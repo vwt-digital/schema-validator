@@ -1,10 +1,10 @@
 import logging
 import datetime
 import json
-import config
 from io import BytesIO
 import gzip
 import jsonschema
+import os
 
 from google.cloud import storage, pubsub_v1
 
@@ -13,13 +13,21 @@ class MessageValidator(object):
     def __init__(self):
         self.storage_client = storage.Client()
         self.publisher = pubsub_v1.PublisherClient()
-        self.project_id = config.PROJECT_ID
-        self.project_path = self.publisher.project_path(self.project_id)
-        self.schema_bucket_name = config.SCHEMA_BUCKET_NAME
+        self.schemas_bucket_name = os.environ.get('SCHEMAS_BUCKET_NAME', 'Required parameter is missing')
+        self.data_catalogs_bucket_name = os.environ.get('DATA_CATALOGS_BUCKET_NAME', 'Required parameter is missing')
+
+    def validate(self):
+        # For every data catalog in the data catalog bucket
+        for blob in self.storage_client.list_blobs(
+                    self.data_catalogs_bucket_name):
+            blob_to_string = blob.download_as_string()
+            blob_to_json = json.loads(blob_to_string)
+            # Validate the messages that every topic with a schema has
+            self.check_messages(blob_to_json)
 
     def check_messages(self, catalog):
         topics_with_schema = []
-        # Check in data catalog if a topic has a schema
+        # Check in data catalog what topic has a schema
         for dataset in catalog['dataset']:
             for dist in dataset.get('distribution', []):
                 if dist.get('format') == 'topic':
@@ -31,8 +39,7 @@ class MessageValidator(object):
                         # Put them in JSON
                         topic_schema_info = {
                             "schema_urn": schema_urn,
-                            "topic_name": topic_name,
-                            "topic_urn": self.project_path + "/topics/" + topic_name
+                            "topic_name": topic_name
                         }
                         # Add info to list
                         topics_with_schema.append(topic_schema_info)
@@ -44,7 +51,7 @@ class MessageValidator(object):
                 ts['topic_name'], ts['schema_urn']))
             # There is a history storage bucket
             ts_history_bucket_name = ts['topic_name'] + "-history-stg"
-            schema_bucket = storage_client.get_bucket(self.schema_bucket_name)
+            schema_bucket = storage_client.get_bucket(self.schemas_bucket_name)
             # Get schema from schema bucket belonging to this topic
             schema_urn_simple = ts['schema_urn'].replace('/', '-')
             schema = schema_bucket.get_blob(schema_urn_simple)
@@ -73,15 +80,7 @@ class MessageValidator(object):
 def validate_messages(request):
     logging.info("Initialized function")
 
-    try:
-        with open('/home/bente/VWT/ODH/operational-data-hub-config/config/vwt-d-gew1-odh-hub/data_catalog.json', 'r') as f:
-            catalog = json.load(f)
-
-        MessageValidator().check_messages(catalog)
-
-    except Exception as e:
-        logging.exception('Unable to compare schema ' +
-                          'because of {}'.format(e))
+    MessageValidator().validate()
 
 
 if __name__ == '__main__':
