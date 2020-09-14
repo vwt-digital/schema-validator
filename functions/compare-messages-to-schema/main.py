@@ -5,8 +5,15 @@ from io import BytesIO
 import gzip
 import jsonschema
 import os
+import config
 
 from google.cloud import storage, pubsub_v1
+import google.auth
+from google.auth.transport import requests as gcp_requests
+from google.auth import iam
+from google.oauth2 import service_account
+
+TOKEN_URI = 'https://accounts.google.com/o/oauth2/token'  # nosec
 
 
 class MessageValidator(object):
@@ -15,6 +22,8 @@ class MessageValidator(object):
         self.publisher = pubsub_v1.PublisherClient()
         self.schemas_bucket_name = os.environ.get('SCHEMAS_BUCKET_NAME', 'Required parameter is missing')
         self.data_catalogs_bucket_name = os.environ.get('DATA_CATALOGS_BUCKET_NAME', 'Required parameter is missing')
+        self.external_credentials = request_auth_token()
+        self.storage_client_external = storage.Client(credentials=self.external_credentials)
 
     def validate(self):
         # For every data catalog in the data catalog bucket
@@ -44,14 +53,13 @@ class MessageValidator(object):
                         # Add info to list
                         topics_with_schema.append(topic_schema_info)
 
-        storage_client = storage.Client()
         # For every topic with a schema
         for ts in topics_with_schema:
             logging.info("The messages of topic {} are validated against schema {}".format(
                 ts['topic_name'], ts['schema_urn']))
             # There is a history storage bucket
             ts_history_bucket_name = ts['topic_name'] + "-history-stg"
-            schema_bucket = storage_client.get_bucket(self.schemas_bucket_name)
+            schema_bucket = self.storage_client.get_bucket(self.schemas_bucket_name)
             # Get schema from schema bucket belonging to this topic
             schema_urn_simple = ts['schema_urn'].replace('/', '-')
             schema = schema_bucket.get_blob(schema_urn_simple)
@@ -61,20 +69,48 @@ class MessageValidator(object):
             month = '{:02d}'.format(yesterday.month)
             day = '{:02d}'.format(yesterday.day)
             bucket_folder = '{}/{}/{}'.format(yesterday.year, month, day)
+            blob_exists = False
             # For every blob in this bucket
-            for blob in self.storage_client.list_blobs(
+            for blob in self.storage_client_external.list_blobs(
                         ts_history_bucket_name, prefix=bucket_folder):
+                blob_exists = True
                 zipbytes = BytesIO(blob.download_as_string())
                 with gzip.open(zipbytes, 'rb') as gzfile:
                     filecontent = gzfile.read()
+                # Get its messages
                 messages = json.loads(filecontent)
                 for msg in messages:
                     try:
+                        # Validate every message against the schema of the topic
+                        # of the bucket
                         jsonschema.validate(msg, schema)
                     except Exception as e:
                         logging.exception('Message is not conform schema' +
                                           ' because of {}'.format(e))
-            logging.info("All messages are conform schema")
+            if blob_exists is False:
+                logging.info("No new messages were published yesterday")
+            else:
+                logging.info("All messages are conform schema")
+
+
+def request_auth_token():
+    try:
+        credentials, project_id = google.auth.default(scopes=['https://www.googleapis.com/auth/iam'])
+
+        request = gcp_requests.Request()
+        credentials.refresh(request)
+
+        signer = iam.Signer(request, credentials, config.DELEGATED_SA)
+        creds = service_account.Credentials(
+            signer=signer,
+            service_account_email=config.DELEGATED_SA,
+            token_uri=TOKEN_URI,
+            scopes=['https://www.googleapis.com/auth/cloud-platform'],
+            subject=config.DELEGATED_SA)
+    except Exception:
+        raise
+
+    return creds
 
 
 def validate_messages(request):
