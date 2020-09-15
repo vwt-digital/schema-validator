@@ -1,0 +1,6 @@
+google-auth==1.21.1
+google-cloud-storage==1.31.0
+google-cloud-pubsub==1.7.0
+google-api-python-client==1.11.0
+grpcio==1.29.0
+jsonschema==3.2.0
