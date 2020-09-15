@@ -6,6 +6,8 @@ import gzip
 import jsonschema
 import os
 import config
+import atlassian
+import secretmanager
 
 from google.cloud import storage, pubsub_v1
 import google.auth
@@ -24,17 +26,23 @@ class MessageValidator(object):
         self.data_catalogs_bucket_name = os.environ.get('DATA_CATALOGS_BUCKET_NAME', 'Required parameter is missing')
         self.external_credentials = request_auth_token()
         self.storage_client_external = storage.Client(credentials=self.external_credentials)
+        self.project_id = os.environ.get('PROJECT_ID', 'Required parameter is missing')
 
     def validate(self):
+        total_messages_not_conform_schema = []
         # For every data catalog in the data catalog bucket
         for blob in self.storage_client.list_blobs(
                     self.data_catalogs_bucket_name):
             blob_to_string = blob.download_as_string()
             blob_to_json = json.loads(blob_to_string)
             # Validate the messages that every topic with a schema has
-            self.check_messages(blob_to_json)
+            messages_not_conform_schema = self.check_messages(blob_to_json)
+            total_messages_not_conform_schema.extend(messages_not_conform_schema)
+        if len(total_messages_not_conform_schema) > 0:
+            self.create_jira_tickets(total_messages_not_conform_schema)
 
     def check_messages(self, catalog):
+        messages_not_conform_schema = []
         topics_with_schema = []
         # Check in data catalog what topic has a schema
         for dataset in catalog['dataset']:
@@ -66,9 +74,10 @@ class MessageValidator(object):
             schema = json.loads(schema.download_as_string())
             # Want to check the messages of the previous day
             yesterday = datetime.date.today()-datetime.timedelta(1)
+            year = yesterday.year
             month = '{:02d}'.format(yesterday.month)
             day = '{:02d}'.format(yesterday.day)
-            bucket_folder = '{}/{}/{}'.format(yesterday.year, month, day)
+            bucket_folder = '{}/{}/{}'.format(year, month, day)
             blob_exists = False
             # For every blob in this bucket
             for blob in self.storage_client_external.list_blobs(
@@ -87,10 +96,66 @@ class MessageValidator(object):
                     except Exception as e:
                         logging.exception('Message is not conform schema' +
                                           ' because of {}'.format(e))
+                        msg_info = {
+                            "schema_urn": ts['schema_urn'],
+                            "topic_name": ts['topic_name'],
+                            "history_bucket": ts_history_bucket_name,
+                            "date": "{}/{}/{}".format(yesterday.year, month, day)
+                        }
+                        if msg_info not in messages_not_conform_schema:
+                            messages_not_conform_schema.append(msg_info)
             if blob_exists is False:
                 logging.info("No new messages were published yesterday")
             else:
                 logging.info("All messages are conform schema")
+        return messages_not_conform_schema
+
+    def create_jira_tickets(self, messages_not_conform_schema):
+        # Jira config
+        jira_user = config.JIRA_USER
+        jira_server = config.JIRA_SERVER
+        jira_project = config.JIRA_PROJECT
+        jira_board = config.JIRA_BOARD
+        jira_epic = config.JIRA_EPIC
+        jira_api_key = secretmanager.get_secret(
+            self.project_id,
+            config.JIRA_SECRET_ID)
+
+        client = atlassian.jira_init(jira_user, jira_api_key, jira_server)
+
+        # Jira jql to find tickets that already exist conform these issues
+        jql = f"project = {jira_project} " \
+              "AND type = Bug AND status != Done AND status != Cancelled " \
+              f"AND \"Epic Link\" = {jira_epic} " \
+              "AND text ~ \"Message not conform schema\" " \
+              "ORDER BY priority DESC"
+        # Get issues that are already conform the 'issue template'
+        titles = atlassian.list_issue_titles(client, jql)
+        # Get current sprint
+        sprint_id = atlassian.get_current_sprint(client, jira_board)
+
+        logging.info(f"Possibly creating tickets for sprint {sprint_id} of project {jira_project}...")
+
+        # For every message that is not conform the schema of its topic
+        for msg_info in messages_not_conform_schema:
+            title = "Message not conform schema: topic '{}' schema '{}'".format(msg_info['topic_name'], msg_info['schema_urn'])
+            description = "The topic `{}` got a message at {} that is not conform its schema ({}). " \
+                          "Please check why the message is not conform the schema. " \
+                          "The message can be found in history bucket {}.".format(
+                              msg_info['topic_name'], msg_info['date'],
+                              msg_info['schema_urn'], msg_info['history_bucket'])
+            # Check if Jira ticket already exists for this topic with this schema
+            if title not in titles:
+                logging.info(f"Creating jira ticket: {title}")
+                # Create a Jira ticket
+                issue = atlassian.create_issue(
+                    client=client,
+                    project=jira_project,
+                    title=title,
+                    description=description)
+                # Add Jira ticket to sprint and epic
+                atlassian.add_to_sprint(client, sprint_id, issue.key)
+                atlassian.add_to_epic(client, jira_epic, issue.key)
 
 
 def request_auth_token():
