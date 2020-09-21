@@ -83,6 +83,7 @@ class MessageValidator(object):
             for blob in self.storage_client_external.list_blobs(
                         ts_history_bucket_name, prefix=bucket_folder):
                 blob_exists = True
+                blob_full_name = blob.name
                 zipbytes = BytesIO(blob.download_as_string())
                 with gzip.open(zipbytes, 'rb') as gzfile:
                     filecontent = gzfile.read()
@@ -100,7 +101,7 @@ class MessageValidator(object):
                             "schema_urn": ts['schema_urn'],
                             "topic_name": ts['topic_name'],
                             "history_bucket": ts_history_bucket_name,
-                            "date": "{}/{}/{}".format(yesterday.year, month, day)
+                            "blob_full_name": blob_full_name
                         }
                         if msg_info not in messages_not_conform_schema:
                             messages_not_conform_schema.append(msg_info)
@@ -139,10 +140,11 @@ class MessageValidator(object):
         # For every message that is not conform the schema of its topic
         for msg_info in messages_not_conform_schema:
             title = "Message not conform schema: topic '{}' schema '{}'".format(msg_info['topic_name'], msg_info['schema_urn'])
-            description = "The topic `{}` got a message at {} that is not conform its schema ({}). " \
+            description = "The topic `{}` got a message in blob {} that is not conform its schema ({}). " \
                           "Please check why the message is not conform the schema. " \
-                          "The message can be found in history bucket {}.".format(
-                              msg_info['topic_name'], msg_info['date'],
+                          "The message can be found in history bucket {}. " \
+                          "Other folders in this bucket on this date might also contain wrong messages".format(
+                              msg_info['topic_name'], msg_info['blob_full_name'],
                               msg_info['schema_urn'], msg_info['history_bucket'])
             # Check if Jira ticket already exists for this topic with this schema
             if title not in titles:
