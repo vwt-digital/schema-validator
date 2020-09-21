@@ -124,14 +124,6 @@ class MessageValidator(object):
 
         client = atlassian.jira_init(jira_user, jira_api_key, jira_server)
 
-        # Jira jql to find tickets that already exist conform these issues
-        jql = f"project = {jira_project} " \
-              "AND type = Bug AND status != Done AND status != Cancelled " \
-              f"AND \"Epic Link\" = {jira_epic} " \
-              "AND text ~ \"Message not conform schema\" " \
-              "ORDER BY priority DESC"
-        # Get issues that are already conform the 'issue template'
-        titles = atlassian.list_issue_titles(client, jql)
         # Get current sprint
         sprint_id = atlassian.get_current_sprint(client, jira_board)
 
@@ -139,14 +131,24 @@ class MessageValidator(object):
 
         # For every message that is not conform the schema of its topic
         for msg_info in messages_not_conform_schema:
-            title = "Message not conform schema: topic '{}' schema '{}'".format(msg_info['topic_name'], msg_info['schema_urn'])
+            # Jira jql to find tickets that already exist conform these issues
+            jql = f"project = {jira_project} " \
+                "AND type = Bug AND status != Done AND status != Cancelled " \
+                f"AND \"Epic Link\" = {jira_epic} " \
+                "AND text ~ \"Message not conform schema\" " \
+                "AND description ~ \"{}\" " \
+                "ORDER BY priority DESC".format(msg_info['blob_full_name'])
+            # Get issues that are already conform the 'issue template'
+            titles = atlassian.list_issue_titles(client, jql)
+            # Make issue
+            title = "Message not conform schema: topic '{}' schema '{}'".format(
+                msg_info['topic_name'], msg_info['schema_urn'])
             description = "The topic `{}` got a message in blob {} that is not conform its schema ({}). " \
                           "Please check why the message is not conform the schema. " \
-                          "The message can be found in history bucket {}. " \
-                          "Other folders in this bucket on this date might also contain wrong messages".format(
+                          "The message can be found in history bucket {}.".format(
                               msg_info['topic_name'], msg_info['blob_full_name'],
                               msg_info['schema_urn'], msg_info['history_bucket'])
-            # Check if Jira ticket already exists for this topic with this schema
+            # Check if Jira ticket already exists for this topic with this schema and this blob in description
             if title not in titles:
                 logging.info(f"Creating jira ticket: {title}")
                 # Create a Jira ticket
