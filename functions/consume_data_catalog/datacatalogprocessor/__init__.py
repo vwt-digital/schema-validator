@@ -15,30 +15,10 @@ class DatacatalogProcessor(object):
     def process(self, payload):
         selector_data = payload[os.environ.get('DATA_SELECTOR', 'Required parameter is missing')]
 
-        # Check if data catalog has a topic with a schema
-        data_catalog_has_schema = self.data_catalog_has_schema(selector_data)
-        if data_catalog_has_schema:
-            return_bool_upload_blob = self.upload_to_storage(selector_data, self.bucket_name)
-            if not return_bool_upload_blob:
-                sys.exit(1)
-
-    def data_catalog_has_schema(self, data_catalog):
-        # if data catalog has a dataset key
-        if 'dataset' in data_catalog:
-            # For dataset in dataset
-            for dataset in data_catalog['dataset']:
-                # if dataset has a distribution key
-                if 'distribution' in dataset:
-                    # For every distribution in distribution
-                    for distribution in dataset['distribution']:
-                        # If the distribution has a describedBy and a describedByType key
-                        if 'describedBy' in distribution and 'describedByType' in distribution:
-                            # data catalog has a topic with a schema
-                            logging.info('Data catalog {} has topic {} with schema {}'.format(
-                                data_catalog['projectId'], distribution['title'],
-                                distribution['describedBy']))
-                            return True
-        return False
+        # Upload data catalog to storage
+        return_bool_upload_blob = self.upload_to_storage(selector_data, self.bucket_name)
+        if not return_bool_upload_blob:
+            sys.exit(1)
 
     def upload_to_storage(self, data_catalog, bucket_name):
         try:
