@@ -95,8 +95,8 @@ class MessageValidator(object):
                         # of the bucket
                         jsonschema.validate(msg, schema)
                     except Exception as e:
-                        logging.exception('Message is not conform schema' +
-                                          ' because of {}'.format(e))
+                        logging.info('Message is not conform schema' +
+                                     ' because of {}'.format(e))
                         msg_info = {
                             "schema_urn": ts['schema_urn'],
                             "topic_name": ts['topic_name'],
