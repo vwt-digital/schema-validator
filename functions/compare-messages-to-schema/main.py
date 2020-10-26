@@ -30,14 +30,18 @@ class MessageValidator(object):
         self.external_credentials = request_auth_token()
         self.storage_client_external = storage.Client(credentials=self.external_credentials)
         self.project_id = os.environ.get('PROJECT_ID', 'Required parameter is missing')
-        self.timeout = os.environ.get('TIMEOUT', 'Required parameter is missing')
+        self.timeout = int(os.environ.get('TIMEOUT', 540))
         self.validate_time_per_topic = 0
+        self.max_response_size = int(os.environ.get('MAX_RESPONSE_SIZE', 10))
+        self.response_size = 0
+        self.response_size_per_topic = 0
 
     def validate(self):
         total_messages_not_conform_schema = []
         # For every data catalog in the data catalog bucket
         for blob in self.storage_client.list_blobs(
                     self.data_catalogs_bucket_name):
+            self.response_size = self.response_size + (blob.size / 1000000)
             blob_to_string = blob.download_as_string()
             blob_to_json = json.loads(blob_to_string)
             # Validate the messages that every topic with a schema has
@@ -71,8 +75,15 @@ class MessageValidator(object):
 
         # Set time to check per topic
         # It's the total time the function can take minus half a minute divided by the total number of topics
+        # Also set max response mb per topic for the blobs
         if len(topics_with_schema) > 0:
-            self.validate_time_per_topic = (int(self.timeout) - 30)/len(topics_with_schema)
+            self.validate_time_per_topic = (self.timeout - 30)/len(topics_with_schema)
+            response_size_now = self.response_size
+            self.response_size_per_topic = (self.max_response_size - response_size_now) / len(topics_with_schema)
+            # Increase response size per topic with 40% because not every topic will have messages and
+            # some topics will have a lot of messages
+            self.response_size_per_topic = self.response_size_per_topic * 1.4
+            self.response_size = 0
         # For every topic with a schema
         for ts in topics_with_schema:
             logging.info("The messages of topic {} are validated against schema {}".format(
@@ -97,7 +108,14 @@ class MessageValidator(object):
                         ts_history_bucket_name, prefix=bucket_folder):
                 blob_exists = True
                 blob_full_name = blob.name
+                blob_size = blob.size / 1000000
+                self.response_size = self.response_size + blob_size
                 try:
+                    # Check if response size is already over max response size
+                    if self.response_size >= self.response_size_per_topic:
+                        logging.info("Max response size for this topic is reached")
+                        self.response_size = 0
+                        break
                     zipbytes = BytesIO(blob.download_as_string())
                 except Exception as e:
                     logging.error(f"Could not download blob as string due to {e}")
@@ -128,15 +146,17 @@ class MessageValidator(object):
                         if msg_info not in messages_not_conform_schema:
                             messages_not_conform_schema.append(msg_info)
                 # Check if the time is already over the max time
-                if time.time() - start_time >= self.validate_time_per_topic:
+                # Or response size is already over max response size
+                if time.time() - start_time >= self.validate_time_per_topic or \
+                   self.response_size >= self.response_size_per_topic:
+                    logging.info("Too many messages uploaded yesterday, did not check all. "
+                                 "The ones that were checked are conform schema.")
+                    self.response_size = 0
                     break
             if blob_exists is False:
                 logging.info("No new messages were published yesterday")
-            elif time.time() - start_time >= self.validate_time_per_topic:
-                logging.info("Too many messages uploaded yesterday, did not check all. "
-                             "The ones that were checked are conform schema.")
             else:
-                logging.info("All messages are conform schema")
+                logging.info("Messages are conform schema")
         return messages_not_conform_schema
 
     def create_jira_tickets(self, messages_not_conform_schema):
