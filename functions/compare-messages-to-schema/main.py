@@ -44,7 +44,10 @@ class MessageValidator(object):
             messages_not_conform_schema = self.check_messages(blob_to_json)
             total_messages_not_conform_schema.extend(messages_not_conform_schema)
         if len(total_messages_not_conform_schema) > 0:
-            self.create_jira_tickets(total_messages_not_conform_schema)
+            try:
+                self.create_jira_tickets(total_messages_not_conform_schema)
+            except Exception as e:
+                logging.error(f"Could not create JIRA tickets due to {e}")
 
     def check_messages(self, catalog):
         messages_not_conform_schema = []
@@ -94,9 +97,15 @@ class MessageValidator(object):
                         ts_history_bucket_name, prefix=bucket_folder):
                 blob_exists = True
                 blob_full_name = blob.name
-                zipbytes = BytesIO(blob.download_as_string())
-                with gzip.open(zipbytes, 'rb') as gzfile:
-                    filecontent = gzfile.read()
+                try:
+                    zipbytes = BytesIO(blob.download_as_string())
+                except Exception as e:
+                    logging.error(f"Could not download blob as string due to {e}")
+                try:
+                    with gzip.open(zipbytes, 'rb') as gzfile:
+                        filecontent = gzfile.read()
+                except Exception as e:
+                    logging.error(f"Could not unzip blob because of {e}")
                 # Get its messages
                 messages = json.loads(filecontent)
                 for msg in messages:
