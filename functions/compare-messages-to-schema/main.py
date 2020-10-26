@@ -104,6 +104,7 @@ class MessageValidator(object):
             blob_exists = False
             start_time = time.time()
             # For every blob in this bucket
+            msgs_not_conform_schema = False
             for blob in self.storage_client_external.list_blobs(
                         ts_history_bucket_name, prefix=bucket_folder):
                 blob_exists = True
@@ -134,9 +135,10 @@ class MessageValidator(object):
                         # Validate every message against the schema of the topic
                         # of the bucket
                         jsonschema.validate(msg, schema)
-                    except Exception as e:
-                        logging.info('Message is not conform schema' +
-                                     ' because of {}'.format(e))
+                    except Exception:
+                        # logging.info('Message is not conform schema' +
+                        #              ' because of {}'.format(e))
+                        msgs_not_conform_schema = True
                         msg_info = {
                             "schema_urn": ts['schema_urn'],
                             "topic_name": ts['topic_name'],
@@ -155,6 +157,8 @@ class MessageValidator(object):
                     break
             if blob_exists is False:
                 logging.info("No new messages were published yesterday")
+            elif msgs_not_conform_schema:
+                logging.info('Topic contains messages that are not conform schema')
             else:
                 logging.info("Messages are conform schema")
         return messages_not_conform_schema
