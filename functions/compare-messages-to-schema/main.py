@@ -8,12 +8,15 @@ import os
 import config
 import atlassian
 import secretmanager
+import time
 
 from google.cloud import storage, pubsub_v1
 import google.auth
 from google.auth.transport import requests as gcp_requests
 from google.auth import iam
 from google.oauth2 import service_account
+
+logging.basicConfig(level=logging.INFO)
 
 TOKEN_URI = 'https://accounts.google.com/o/oauth2/token'  # nosec
 
@@ -27,6 +30,8 @@ class MessageValidator(object):
         self.external_credentials = request_auth_token()
         self.storage_client_external = storage.Client(credentials=self.external_credentials)
         self.project_id = os.environ.get('PROJECT_ID', 'Required parameter is missing')
+        self.timeout = os.environ.get('TIMEOUT', 'Required parameter is missing')
+        self.validate_time_per_topic = 0
 
     def validate(self):
         total_messages_not_conform_schema = []
@@ -61,6 +66,10 @@ class MessageValidator(object):
                         # Add info to list
                         topics_with_schema.append(topic_schema_info)
 
+        # Set time to check per topic
+        # It's the total time the function can take minus half a minute divided by the total number of topics
+        if len(topics_with_schema) > 0:
+            self.validate_time_per_topic = (int(self.timeout) - 30)/len(topics_with_schema)
         # For every topic with a schema
         for ts in topics_with_schema:
             logging.info("The messages of topic {} are validated against schema {}".format(
@@ -79,6 +88,7 @@ class MessageValidator(object):
             day = '{:02d}'.format(yesterday.day)
             bucket_folder = '{}/{}/{}'.format(year, month, day)
             blob_exists = False
+            start_time = time.time()
             # For every blob in this bucket
             for blob in self.storage_client_external.list_blobs(
                         ts_history_bucket_name, prefix=bucket_folder):
@@ -91,6 +101,9 @@ class MessageValidator(object):
                 messages = json.loads(filecontent)
                 for msg in messages:
                     try:
+                        # Check if the time is already over the max time
+                        if time.time() - start_time >= self.validate_time_per_topic:
+                            break
                         # Validate every message against the schema of the topic
                         # of the bucket
                         jsonschema.validate(msg, schema)
@@ -105,8 +118,14 @@ class MessageValidator(object):
                         }
                         if msg_info not in messages_not_conform_schema:
                             messages_not_conform_schema.append(msg_info)
+                # Check if the time is already over the max time
+                if time.time() - start_time >= self.validate_time_per_topic:
+                    break
             if blob_exists is False:
                 logging.info("No new messages were published yesterday")
+            elif time.time() - start_time >= self.validate_time_per_topic:
+                logging.info("Too many messages uploaded yesterday, did not check all. "
+                             "The ones that were checked are conform schema.")
             else:
                 logging.info("All messages are conform schema")
         return messages_not_conform_schema
