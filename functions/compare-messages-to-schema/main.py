@@ -168,6 +168,7 @@ class MessageValidator(object):
         jira_user = config.JIRA_USER
         jira_server = config.JIRA_SERVER
         jira_project = config.JIRA_PROJECT
+        jira_projects = config.JIRA_PROJECTS
         jira_board = config.JIRA_BOARD
         jira_epic = config.JIRA_EPIC
         jira_api_key = secretmanager.get_secret(
@@ -179,16 +180,19 @@ class MessageValidator(object):
         # Get current sprint
         sprint_id = atlassian.get_current_sprint(client, jira_board)
 
-        logging.info(f"Possibly creating tickets for sprint {sprint_id} of project {jira_project}...")
+        jira_projects_list = jira_projects.split('+')
+        logging.info(f"Possibly creating tickets for sprint {sprint_id} of projects {jira_projects_list}...")
 
         # For every message that is not conform the schema of its topic
         for msg_info in messages_not_conform_schema:
             # Jira jql to find tickets that already exist conform these issues
-            jql = f"project = {jira_project} " \
-                "AND type = Bug AND status != Done AND status != Cancelled " \
-                f"AND \"Epic Link\" = {jira_epic} " \
-                "AND text ~ \"Message not conform schema\" " \
-                "ORDER BY priority DESC".format(msg_info['blob_full_name'])
+            jql_prefix = f"type = Bug AND status != Done AND status != Cancelled " \
+                  f"AND \"Epic Link\" = {jira_epic} " \
+                  "AND text ~ \"Message not conform schema\" " \
+                  "AND project = "
+            projects = [jql_prefix + project for project in jira_projects_list]
+            jql = " OR ".join(projects)
+            jql = f"{jql} ORDER BY priority DESC "
             # Get issues that are already conform the 'issue template'
             titles = atlassian.list_issue_titles(client, jql)
             # Make issue
