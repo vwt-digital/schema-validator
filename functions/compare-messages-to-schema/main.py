@@ -84,8 +84,10 @@ class MessageValidator(object):
             # some topics will have a lot of messages
             self.response_size_per_topic = self.response_size_per_topic * 1.4
             self.response_size = 0
+        topics_checked = 0
         # For every topic with a schema
         for ts in topics_with_schema:
+            topic_checked = False
             logging.info("The messages of topic {} are validated against schema {}".format(
                 ts['topic_name'], ts['schema_urn']))
             # There is a history storage bucket
@@ -135,15 +137,18 @@ class MessageValidator(object):
                         # Validate every message against the schema of the topic
                         # of the bucket
                         jsonschema.validate(msg, schema)
-                    except Exception:
-                        # logging.info('Message is not conform schema' +
-                        #              ' because of {}'.format(e))
+                        if topic_checked is False:
+                            topics_checked = topics_checked + 1
+                            topic_checked = True
+                    except jsonschema.exceptions.ValidationError as e:
                         msgs_not_conform_schema = True
                         msg_info = {
                             "schema_urn": ts['schema_urn'],
                             "topic_name": ts['topic_name'],
                             "history_bucket": ts_history_bucket_name,
-                            "blob_full_name": blob_full_name
+                            "blob_full_name": blob_full_name,
+                            "message": msg,
+                            "error": e
                         }
                         if msg_info not in messages_not_conform_schema:
                             messages_not_conform_schema.append(msg_info)
@@ -161,6 +166,10 @@ class MessageValidator(object):
                 logging.info('Topic contains messages that are not conform schema')
             else:
                 logging.info("Messages are conform schema")
+        # Check if for all topics at least one message has been validated
+        if topics_checked is not len(topics_with_schema):
+            logging.error("At least one message per topic should be validated, check if validate_time_per_topic"
+                          " and/or response_size_per_topic are high enough")
         return messages_not_conform_schema
 
     def create_jira_tickets(self, messages_not_conform_schema):
@@ -181,31 +190,77 @@ class MessageValidator(object):
         sprint_id = atlassian.get_current_sprint(client, jira_board)
 
         jira_projects_list = jira_projects.split('+')
-        logging.info(f"Possibly creating tickets for sprint {sprint_id} of projects {jira_projects_list}...")
+        logging.info(f"Possibly creating or updating tickets for sprint {sprint_id} of projects {jira_projects_list}...")
 
+        # Jira jql to find tickets that already exist conform these issues
+        jql_prefix = f"type = Bug AND status != Done AND status != Cancelled " \
+            f"AND \"Epic Link\" = {jira_epic} " \
+            "AND text ~ \"Message not conform schema\" " \
+            "AND project = "
+        projects = [jql_prefix + project for project in jira_projects_list]
+        jql = " OR ".join(projects)
+        jql = f"{jql} ORDER BY priority DESC "
+
+        made_comments = []
         # For every message that is not conform the schema of its topic
         for msg_info in messages_not_conform_schema:
-            # Jira jql to find tickets that already exist conform these issues
-            jql_prefix = f"type = Bug AND status != Done AND status != Cancelled " \
-                  f"AND \"Epic Link\" = {jira_epic} " \
-                  "AND text ~ \"Message not conform schema\" " \
-                  "AND project = "
-            projects = [jql_prefix + project for project in jira_projects_list]
-            jql = " OR ".join(projects)
-            jql = f"{jql} ORDER BY priority DESC "
+            # Make issue
+            title = "Messages not conform schema: topic '{}' schema '{}'".format(
+                msg_info['topic_name'], msg_info['schema_urn'])
+            # Error information
+            e = msg_info['error']
+            error_schema = e.schema
+            error_message = e.message
+            error_absolute_schema_path = f"{list(e.absolute_schema_path)}"
+            error_absolute_path = f"{list(e.absolute_path)}"
+            error_value = f"{e.validator} '{e.validator_value}'"
+            message = msg_info['message']
+            # Check if the error was already commented in this session
+            comment_info = {
+                "error_absolute_path": error_absolute_path,
+                "error_absolute_schema_path": error_absolute_schema_path,
+                "error_value": error_value,
+                "title": title
+            }
+            # If it is, skip the message
+            if comment_info in made_comments:
+                continue
+
+            # Make comment
+            comment = f"Wrong message can be found in blob {msg_info['blob_full_name']} in history bucket {msg_info['history_bucket']}" + \
+                "\nThe message containing the error:" + \
+                "{code:JSON}" + \
+                f"  {message}" + \
+                "{code}" + \
+                f"\nThe error in the message can be found in key: {error_absolute_path}" + \
+                "\nThe error in the message is:" + \
+                "{code:JSON}" + \
+                f"  {error_message}" + \
+                "{code}" + \
+                "\nSchema used to validate this message:" + \
+                "{code:JSON}" + \
+                f"  {error_schema}" + \
+                "{code}" + \
+                f"\nIn the schema, the error can be found in key: {error_absolute_schema_path}"
             # Get issues that are already conform the 'issue template'
             titles = atlassian.list_issue_titles(client, jql)
-            # Make issue
-            title = "Message not conform schema: topic '{}' schema '{}'".format(
-                msg_info['topic_name'], msg_info['schema_urn'])
-            description = "The topic `{}` got a message in blob {} that is not conform its schema ({}). " \
-                          "Please check why the message is not conform the schema. " \
-                          "The message can be found in history bucket {}. " \
-                          "Other folders in this bucket might also contain wrong messages".format(
-                              msg_info['topic_name'], msg_info['blob_full_name'],
-                              msg_info['schema_urn'], msg_info['history_bucket'])
+            # Get issues with title
+            issues = atlassian.list_issues(client, jql)
+            # For every issue with this title
+            for issue in issues:
+                # Get comments of issues
+                issue_id = atlassian.get_issue_id(client, issue)
+                issue_comment_ids = atlassian.list_issue_comment_ids(client, issue_id)
+                comment_bodies = []
+                for comment_id in issue_comment_ids:
+                    comment_body = atlassian.get_comment_body(client, issue, comment_id)
+                    comment_bodies.append(comment_body)
             # Check if Jira ticket already exists for this topic with this schema
             if title not in titles:
+                description = f"The topic `{msg_info['topic_name']}` received messages" + \
+                              f" that are not conform its schema ({msg_info['schema_urn']})." + \
+                              " The messages with their errors can be found in the comments of this ticket" + \
+                              " Please check why the messages are not conform the schema. "
                 logging.info(f"Creating jira ticket: {title}")
                 # Create a Jira ticket
                 issue = atlassian.create_issue(
@@ -213,9 +268,19 @@ class MessageValidator(object):
                     project=jira_project,
                     title=title,
                     description=description)
+                # Add comment to jira ticket
+                atlassian.add_comment(client, issue, comment)
                 # Add Jira ticket to sprint and epic
                 atlassian.add_to_sprint(client, sprint_id, issue.key)
                 atlassian.add_to_epic(client, jira_epic, issue.key)
+            # If it does exist, add a comment with the message and its error
+            else:
+                # Check if the comment does not yet exist
+                if comment not in comment_bodies:
+                    # Check if the error message has not already been created in this session
+                    made_comments.append(comment_info)
+                    # Add comment to jira ticket
+                    atlassian.add_comment(client, issue_id, comment)
 
 
 def request_auth_token():
