@@ -147,7 +147,6 @@ class MessageValidator(object):
                             "topic_name": ts['topic_name'],
                             "history_bucket": ts_history_bucket_name,
                             "blob_full_name": blob_full_name,
-                            "message": msg,
                             "error": e
                         }
                         if msg_info not in messages_not_conform_schema:
@@ -162,6 +161,7 @@ class MessageValidator(object):
                     break
             if blob_exists is False:
                 logging.info("No new messages were published yesterday")
+                topics_checked = topics_checked + 1
             elif msgs_not_conform_schema:
                 logging.info('Topic contains messages that are not conform schema')
             else:
@@ -209,12 +209,12 @@ class MessageValidator(object):
                 msg_info['topic_name'], msg_info['schema_urn'])
             # Error information
             e = msg_info['error']
-            error_schema = e.schema
             error_message = e.message
             error_absolute_schema_path = f"{list(e.absolute_schema_path)}"
             error_absolute_path = f"{list(e.absolute_path)}"
             error_value = f"{e.validator} '{e.validator_value}'"
-            message = msg_info['message']
+            instance = f"{e.instance}"
+            error = error_message.replace(f"{instance} ", "")
             # Check if the error was already commented in this session
             comment_info = {
                 "error_absolute_path": error_absolute_path,
@@ -227,21 +227,12 @@ class MessageValidator(object):
                 continue
 
             # Make comment
-            comment = f"Wrong message can be found in blob {msg_info['blob_full_name']} in history bucket {msg_info['history_bucket']}" + \
-                "\nThe message containing the error:" + \
-                "{code:JSON}" + \
-                f"  {message}" + \
-                "{code}" + \
-                f"\nThe error in the message can be found in key: {error_absolute_path}" + \
-                "\nThe error in the message is:" + \
-                "{code:JSON}" + \
-                f"  {error_message}" + \
-                "{code}" + \
-                "\nSchema used to validate this message:" + \
-                "{code:JSON}" + \
-                f"  {error_schema}" + \
-                "{code}" + \
-                f"\nIn the schema, the error can be found in key: {error_absolute_schema_path}"
+            comment_place = f"Wrong message can be found in blob {msg_info['blob_full_name']}" + \
+                            f" in history bucket {msg_info['history_bucket']}"
+            comment_error_msg_key = f"\nThe error in the message can be found in key: {error_absolute_path}"
+            comment_error = f"\nThe error for this key is: {error}"
+            comment_schema_key = f"\nIn the schema, the error can be found in key: {error_absolute_schema_path}"
+            comment = comment_place + comment_error_msg_key + comment_error + comment_schema_key
             # Get issues that are already conform the 'issue template'
             titles = atlassian.list_issue_titles(client, jql)
             # Get issues with title
