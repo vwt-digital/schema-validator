@@ -80,9 +80,7 @@ class MessageValidator(object):
             self.validate_time_per_topic = (self.timeout - 30)/len(topics_with_schema)
             response_size_now = self.response_size
             self.response_size_per_topic = (self.max_response_size - response_size_now) / len(topics_with_schema)
-            # Increase response size per topic with 40% because not every topic will have messages and
-            # some topics will have a lot of messages
-            self.response_size_per_topic = self.response_size_per_topic * 1.4
+            self.response_size_per_topic = self.response_size_per_topic
             self.response_size = 0
         topics_checked = 0
         # For every topic with a schema
@@ -107,15 +105,18 @@ class MessageValidator(object):
             start_time = time.time()
             # For every blob in this bucket
             msgs_not_conform_schema = False
+            blobs_checked = 0
             for blob in self.storage_client_external.list_blobs(
                         ts_history_bucket_name, prefix=bucket_folder):
+                blobs_checked = blobs_checked + 1
                 blob_exists = True
                 blob_full_name = blob.name
                 blob_size = blob.size / 1000000
                 self.response_size = self.response_size + blob_size
                 try:
                     # Check if response size is already over max response size
-                    if self.response_size >= self.response_size_per_topic:
+                    # And at least one blob has already been checked
+                    if self.response_size >= self.response_size_per_topic and blobs_checked > 1:
                         logging.info("Max response size for this topic is reached")
                         self.response_size = 0
                         break
