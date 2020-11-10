@@ -135,12 +135,12 @@ class MessageValidator(object):
                         # Check if the time is already over the max time
                         if time.time() - start_time >= self.validate_time_per_topic:
                             break
-                        # Validate every message against the schema of the topic
-                        # of the bucket
-                        jsonschema.validate(msg, schema)
                         if topic_checked is False:
                             topics_checked = topics_checked + 1
                             topic_checked = True
+                        # Validate every message against the schema of the topic
+                        # of the bucket
+                        jsonschema.validate(msg, schema)
                     except jsonschema.exceptions.ValidationError as e:
                         msgs_not_conform_schema = True
                         msg_info = {
@@ -236,17 +236,6 @@ class MessageValidator(object):
             comment = comment_place + comment_error_msg_key + comment_error + comment_schema_key
             # Get issues that are already conform the 'issue template'
             titles = atlassian.list_issue_titles(client, jql)
-            # Get issues with title
-            issues = atlassian.list_issues(client, jql)
-            # For every issue with this title
-            for issue in issues:
-                # Get comments of issues
-                issue_id = atlassian.get_issue_id(client, issue)
-                issue_comment_ids = atlassian.list_issue_comment_ids(client, issue_id)
-                comment_bodies = []
-                for comment_id in issue_comment_ids:
-                    comment_body = atlassian.get_comment_body(client, issue, comment_id)
-                    comment_bodies.append(comment_body)
             # Check if Jira ticket already exists for this topic with this schema
             if title not in titles:
                 description = f"The topic `{msg_info['topic_name']}` received messages" + \
@@ -261,18 +250,44 @@ class MessageValidator(object):
                     title=title,
                     description=description)
                 # Add comment to jira ticket
+                made_comments.append(comment_info)
                 atlassian.add_comment(client, issue, comment)
                 # Add Jira ticket to sprint and epic
                 atlassian.add_to_sprint(client, sprint_id, issue.key)
                 atlassian.add_to_epic(client, jira_epic, issue.key)
             # If it does exist, add a comment with the message and its error
             else:
-                # Check if the comment does not yet exist
-                if comment not in comment_bodies:
-                    # Check if the error message has not already been created in this session
+                # Check if the error message has not already been created in this session
+                if comment_info not in made_comments:
+                    # Add comment to made comments in this session
                     made_comments.append(comment_info)
-                    # Add comment to jira ticket
-                    atlassian.add_comment(client, issue_id, comment)
+                    # Get issues with title
+                    jql_prefix_titles = f"type = Bug AND status != Done AND status != Cancelled " \
+                        f"AND \"Epic Link\" = {jira_epic} " \
+                        f"AND text ~ \"{title}\" " \
+                        "AND project = "
+                    projects_titles = [jql_prefix_titles + project for project in jira_projects_list]
+                    jql_titles = " OR ".join(projects_titles)
+                    jql_titles = f"{jql_titles} ORDER BY priority DESC "
+                    issues = atlassian.list_issues(client, jql_titles)
+                    # For every issue with this title
+                    for issue in issues:
+                        # Get comments of issues
+                        issue_id = atlassian.get_issue_id(client, issue)
+                        issue_comment_ids = atlassian.list_issue_comment_ids(client, issue_id)
+                        comment_not_yet_exists = True
+                        for comment_id in issue_comment_ids:
+                            # Check if the comment without where to find it does not yet exist
+                            comment_body = atlassian.get_comment_body(client, issue, comment_id)
+                            if comment_error_msg_key in comment_body \
+                                    and comment_error in comment_body \
+                                    and comment_schema_key in comment_body:
+                                comment_not_yet_exists = False
+                                break
+                        if comment_not_yet_exists:
+                            logging.info(f"Updating jira ticket: {title}")
+                            # Add comment to jira ticket
+                            atlassian.add_comment(client, issue_id, comment)
 
 
 def request_auth_token():
