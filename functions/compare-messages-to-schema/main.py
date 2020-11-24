@@ -180,7 +180,6 @@ class MessageValidator(object):
         jira_project = config.JIRA_PROJECT
         jira_projects = config.JIRA_PROJECTS
         jira_board = config.JIRA_BOARD
-        jira_epic = config.JIRA_EPIC
         jira_api_key = secretmanager.get_secret(
             self.project_id,
             config.JIRA_SECRET_ID)
@@ -194,8 +193,7 @@ class MessageValidator(object):
         logging.info(f"Possibly creating or updating tickets for sprint {sprint_id} of projects {jira_projects_list}...")
 
         # Jira jql to find tickets that already exist conform these issues
-        jql_prefix = f"type = Bug AND status != Done AND status != Cancelled " \
-            f"AND \"Epic Link\" = {jira_epic} " \
+        jql_prefix = "type = Bug AND status != Done AND status != Cancelled " \
             "AND text ~ \"Message not conform schema\" " \
             "AND project = "
         projects = [jql_prefix + project for project in jira_projects_list]
@@ -252,9 +250,8 @@ class MessageValidator(object):
                 # Add comment to jira ticket
                 made_comments.append(comment_info)
                 atlassian.add_comment(client, issue, comment)
-                # Add Jira ticket to sprint and epic
+                # Add Jira ticket to sprint
                 atlassian.add_to_sprint(client, sprint_id, issue.key)
-                atlassian.add_to_epic(client, jira_epic, issue.key)
             # If it does exist, add a comment with the message and its error
             else:
                 # Check if the error message has not already been created in this session
@@ -263,7 +260,6 @@ class MessageValidator(object):
                     made_comments.append(comment_info)
                     # Get issues with title
                     jql_prefix_titles = f"type = Bug AND status != Done AND status != Cancelled " \
-                        f"AND \"Epic Link\" = {jira_epic} " \
                         f"AND text ~ \"{title}\" " \
                         "AND project = "
                     projects_titles = [jql_prefix_titles + project for project in jira_projects_list]
