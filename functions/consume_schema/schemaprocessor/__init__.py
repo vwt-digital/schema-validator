@@ -28,7 +28,7 @@ class SchemaProcessor(object):
             blobs_to_delete = []
             for blob in blobs:
                 # If blob is already in bucket
-                if blob.name == self.schema_name_from_urn(schema['$id']):
+                if blob.name == self.schema_name_from_tag(schema['$id']):
                     # Remove it because it could be an older version of the schema
                     blobs_to_delete.append(blob.name)
             for blob_name in blobs_to_delete:
@@ -36,7 +36,7 @@ class SchemaProcessor(object):
                 blob = bucket.blob(blob_name)
                 blob.delete()
             # Now add the schema to the storage
-            blob = bucket.blob(self.schema_name_from_urn(schema['$id']))
+            blob = bucket.blob(self.schema_name_from_tag(schema['$id']))
             blob.upload_from_string(
                 data=json.dumps(schema),
                 content_type='application/json'
@@ -48,6 +48,6 @@ class SchemaProcessor(object):
                               'to storage because of {}'.format(e))
         return False
 
-    def schema_name_from_urn(self, schema_name):
+    def schema_name_from_tag(self, schema_name):
         schema_name = schema_name.replace('/', '-')
         return schema_name
