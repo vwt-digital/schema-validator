@@ -62,12 +62,12 @@ class MessageValidator(object):
                 if dist.get('format') == 'topic':
                     # Get dataset topic only if it has a schema
                     if 'describedBy' in dist and 'describedByType' in dist:
-                        # Get schema urn and topic title
-                        schema_urn = dist.get('describedBy')
+                        # Get schema tag and topic title
+                        schema_tag = dist.get('describedBy')
                         topic_name = dist.get('title', 'unknown')
                         # Put them in JSON
                         topic_schema_info = {
-                            "schema_urn": schema_urn,
+                            "schema_tag": schema_tag,
                             "topic_name": topic_name
                         }
                         # Add info to list
@@ -87,13 +87,13 @@ class MessageValidator(object):
         for ts in topics_with_schema:
             topic_checked = False
             logging.info("The messages of topic {} are validated against schema {}".format(
-                ts['topic_name'], ts['schema_urn']))
+                ts['topic_name'], ts['schema_tag']))
             # There is a history storage bucket
             ts_history_bucket_name = ts['topic_name'] + "-history-stg"
             schema_bucket = self.storage_client.get_bucket(self.schemas_bucket_name)
             # Get schema from schema bucket belonging to this topic
-            schema_urn_simple = ts['schema_urn'].replace('/', '-')
-            schema = schema_bucket.get_blob(schema_urn_simple)
+            schema_tag_simple = ts['schema_tag'].replace('/', '-')
+            schema = schema_bucket.get_blob(schema_tag_simple)
             schema = json.loads(schema.download_as_string())
             # Want to check the messages of the previous day
             yesterday = datetime.date.today()-datetime.timedelta(1)
@@ -144,7 +144,7 @@ class MessageValidator(object):
                     except jsonschema.exceptions.ValidationError as e:
                         msgs_not_conform_schema = True
                         msg_info = {
-                            "schema_urn": ts['schema_urn'],
+                            "schema_tag": ts['schema_tag'],
                             "topic_name": ts['topic_name'],
                             "history_bucket": ts_history_bucket_name,
                             "blob_full_name": blob_full_name,
@@ -205,7 +205,7 @@ class MessageValidator(object):
         for msg_info in messages_not_conform_schema:
             # Make issue
             title = "Messages not conform schema: topic '{}' schema '{}'".format(
-                msg_info['topic_name'], msg_info['schema_urn'])
+                msg_info['topic_name'], msg_info['schema_tag'])
             # Error information
             e = msg_info['error']
             error_message = e.message
@@ -237,7 +237,7 @@ class MessageValidator(object):
             # Check if Jira ticket already exists for this topic with this schema
             if title not in titles:
                 description = f"The topic `{msg_info['topic_name']}` received messages" + \
-                              f" that are not conform its schema ({msg_info['schema_urn']})." + \
+                              f" that are not conform its schema ({msg_info['schema_tag']})." + \
                               " The messages with their errors can be found in the comments of this ticket" + \
                               " Please check why the messages are not conform the schema. "
                 logging.info(f"Creating jira ticket: {title}")
