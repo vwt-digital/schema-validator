@@ -13,13 +13,17 @@ class SchemaProcessor(object):
         self.bucket_name = os.environ.get('BUCKET_NAME', 'Required parameter is missing')
 
     def process(self, payload):
-        selector_data = payload[os.environ.get('DATA_SELECTOR', 'Required parameter is missing')]
+        schemas = payload[os.environ.get('DATA_SELECTOR', 'Required parameter is missing')]
 
-        return_bool_upload_blob = self.upload_to_storage(selector_data, self.bucket_name)
-        if not return_bool_upload_blob:
-            sys.exit(1)
+        for schema in schemas:
+            return_bool_upload_blob = self.upload_to_storage(schema, self.bucket_name)
+            if not return_bool_upload_blob:
+                sys.exit(1)
 
     def upload_to_storage(self, schema, bucket_name):
+        schema_id = schema['$id']
+        if not schema_id.endswith(".json"):
+            schema_id = schema_id + ".json"
         try:
             storage_client = storage.Client()
             bucket = storage_client.get_bucket(bucket_name)
@@ -28,7 +32,7 @@ class SchemaProcessor(object):
             blobs_to_delete = []
             for blob in blobs:
                 # If blob is already in bucket
-                if blob.name == self.schema_name_from_tag(schema['$id']):
+                if blob.name == self.schema_name_from_tag(schema_id):
                     # Remove it because it could be an older version of the schema
                     blobs_to_delete.append(blob.name)
             for blob_name in blobs_to_delete:
@@ -36,12 +40,12 @@ class SchemaProcessor(object):
                 blob = bucket.blob(blob_name)
                 blob.delete()
             # Now add the schema to the storage
-            blob = bucket.blob(self.schema_name_from_tag(schema['$id']))
+            blob = bucket.blob(self.schema_name_from_tag(schema_id))
             blob.upload_from_string(
                 data=json.dumps(schema),
                 content_type='application/json'
             )
-            logging.info('Uploaded schema {} to bucket {}'.format(schema['$id'], bucket_name))
+            logging.info('Uploaded schema {} to bucket {}'.format(schema_id, bucket_name))
             return True
         except Exception as e:
             logging.exception('Unable to upload schema ' +
