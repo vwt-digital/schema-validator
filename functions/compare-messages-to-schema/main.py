@@ -9,6 +9,7 @@ import config
 import atlassian
 import secretmanager
 import time
+from fill_refs_schema import fill_refs
 
 from google.cloud import storage, pubsub_v1
 import google.auth
@@ -93,8 +94,13 @@ class MessageValidator(object):
             schema_bucket = self.storage_client.get_bucket(self.schemas_bucket_name)
             # Get schema from schema bucket belonging to this topic
             schema_tag_simple = ts['schema_tag'].replace('/', '_')
-            schema = schema_bucket.get_blob(schema_tag_simple)
-            schema = json.loads(schema.download_as_string())
+            try:
+                schema = schema_bucket.get_blob(schema_tag_simple)
+                schema = json.loads(schema.download_as_string())
+            except Exception as e:
+                logging.error(f"Could not download schema {schema_tag_simple} as string due to {e}")
+            # Now fill in the references in the schema
+            schema = fill_refs(schema)
             # Want to check the messages of the previous day
             yesterday = datetime.date.today()-datetime.timedelta(1)
             year = yesterday.year
