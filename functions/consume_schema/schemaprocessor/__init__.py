@@ -53,5 +53,5 @@ class SchemaProcessor(object):
         return False
 
     def schema_name_from_tag(self, schema_name):
-        schema_name = schema_name.replace('/', '-')
+        schema_name = schema_name.replace('/', '_')
         return schema_name

@@ -92,7 +92,7 @@ class MessageValidator(object):
             ts_history_bucket_name = ts['topic_name'] + "-history-stg"
             schema_bucket = self.storage_client.get_bucket(self.schemas_bucket_name)
             # Get schema from schema bucket belonging to this topic
-            schema_tag_simple = ts['schema_tag'].replace('/', '-')
+            schema_tag_simple = ts['schema_tag'].replace('/', '_')
             schema = schema_bucket.get_blob(schema_tag_simple)
             schema = json.loads(schema.download_as_string())
             # Want to check the messages of the previous day
