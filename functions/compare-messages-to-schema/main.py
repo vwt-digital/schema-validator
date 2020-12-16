@@ -9,6 +9,7 @@ import config
 import atlassian
 import secretmanager
 import time
+from fill_refs_schema import fill_refs
 
 from google.cloud import storage, pubsub_v1
 import google.auth
@@ -62,12 +63,12 @@ class MessageValidator(object):
                 if dist.get('format') == 'topic':
                     # Get dataset topic only if it has a schema
                     if 'describedBy' in dist and 'describedByType' in dist:
-                        # Get schema urn and topic title
-                        schema_urn = dist.get('describedBy')
+                        # Get schema tag and topic title
+                        schema_tag = dist.get('describedBy')
                         topic_name = dist.get('title', 'unknown')
                         # Put them in JSON
                         topic_schema_info = {
-                            "schema_urn": schema_urn,
+                            "schema_tag": schema_tag,
                             "topic_name": topic_name
                         }
                         # Add info to list
@@ -87,14 +88,19 @@ class MessageValidator(object):
         for ts in topics_with_schema:
             topic_checked = False
             logging.info("The messages of topic {} are validated against schema {}".format(
-                ts['topic_name'], ts['schema_urn']))
+                ts['topic_name'], ts['schema_tag']))
             # There is a history storage bucket
             ts_history_bucket_name = ts['topic_name'] + "-history-stg"
             schema_bucket = self.storage_client.get_bucket(self.schemas_bucket_name)
             # Get schema from schema bucket belonging to this topic
-            schema_urn_simple = ts['schema_urn'].replace('/', '-')
-            schema = schema_bucket.get_blob(schema_urn_simple)
-            schema = json.loads(schema.download_as_string())
+            schema_tag_simple = ts['schema_tag'].replace('/', '_')
+            try:
+                schema = schema_bucket.get_blob(schema_tag_simple)
+                schema = json.loads(schema.download_as_string())
+            except Exception as e:
+                logging.error(f"Could not download schema {schema_tag_simple} as string due to {e}")
+            # Now fill in the references in the schema
+            schema = fill_refs(schema)
             # Want to check the messages of the previous day
             yesterday = datetime.date.today()-datetime.timedelta(1)
             year = yesterday.year
@@ -144,7 +150,7 @@ class MessageValidator(object):
                     except jsonschema.exceptions.ValidationError as e:
                         msgs_not_conform_schema = True
                         msg_info = {
-                            "schema_urn": ts['schema_urn'],
+                            "schema_tag": ts['schema_tag'],
                             "topic_name": ts['topic_name'],
                             "history_bucket": ts_history_bucket_name,
                             "blob_full_name": blob_full_name,
@@ -180,7 +186,6 @@ class MessageValidator(object):
         jira_project = config.JIRA_PROJECT
         jira_projects = config.JIRA_PROJECTS
         jira_board = config.JIRA_BOARD
-        jira_epic = config.JIRA_EPIC
         jira_api_key = secretmanager.get_secret(
             self.project_id,
             config.JIRA_SECRET_ID)
@@ -194,8 +199,7 @@ class MessageValidator(object):
         logging.info(f"Possibly creating or updating tickets for sprint {sprint_id} of projects {jira_projects_list}...")
 
         # Jira jql to find tickets that already exist conform these issues
-        jql_prefix = f"type = Bug AND status != Done AND status != Cancelled " \
-            f"AND \"Epic Link\" = {jira_epic} " \
+        jql_prefix = "type = Bug AND status != Done AND status != Cancelled " \
             "AND text ~ \"Message not conform schema\" " \
             "AND project = "
         projects = [jql_prefix + project for project in jira_projects_list]
@@ -207,7 +211,7 @@ class MessageValidator(object):
         for msg_info in messages_not_conform_schema:
             # Make issue
             title = "Messages not conform schema: topic '{}' schema '{}'".format(
-                msg_info['topic_name'], msg_info['schema_urn'])
+                msg_info['topic_name'], msg_info['schema_tag'])
             # Error information
             e = msg_info['error']
             error_message = e.message
@@ -239,7 +243,7 @@ class MessageValidator(object):
             # Check if Jira ticket already exists for this topic with this schema
             if title not in titles:
                 description = f"The topic `{msg_info['topic_name']}` received messages" + \
-                              f" that are not conform its schema ({msg_info['schema_urn']})." + \
+                              f" that are not conform its schema ({msg_info['schema_tag']})." + \
                               " The messages with their errors can be found in the comments of this ticket" + \
                               " Please check why the messages are not conform the schema. "
                 logging.info(f"Creating jira ticket: {title}")
@@ -252,9 +256,8 @@ class MessageValidator(object):
                 # Add comment to jira ticket
                 made_comments.append(comment_info)
                 atlassian.add_comment(client, issue, comment)
-                # Add Jira ticket to sprint and epic
+                # Add Jira ticket to sprint
                 atlassian.add_to_sprint(client, sprint_id, issue.key)
-                atlassian.add_to_epic(client, jira_epic, issue.key)
             # If it does exist, add a comment with the message and its error
             else:
                 # Check if the error message has not already been created in this session
@@ -263,7 +266,6 @@ class MessageValidator(object):
                     made_comments.append(comment_info)
                     # Get issues with title
                     jql_prefix_titles = f"type = Bug AND status != Done AND status != Cancelled " \
-                        f"AND \"Epic Link\" = {jira_epic} " \
                         f"AND text ~ \"{title}\" " \
                         "AND project = "
                     projects_titles = [jql_prefix_titles + project for project in jira_projects_list]
