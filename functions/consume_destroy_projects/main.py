@@ -59,7 +59,7 @@ if __name__ == '__main__':
     msg = {
         'destroy_projects': [
             {
-                'project_id': 'vwt-d-gew1-dat-hallo'
+                'project_id': 'my-destroyed-project'
             }
         ]
     }
