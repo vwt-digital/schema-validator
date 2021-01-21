@@ -8,8 +8,8 @@ import config
 import atlassian
 import secretmanager
 import time
-import tempfile
 import tarfile
+import uuid
 from fill_refs_schema import fill_refs
 
 from google.cloud import storage
@@ -134,17 +134,15 @@ class MessageValidator(object):
                     if blob.content_type == 'application/json':
                         messages.extend(json.loads(blob.download_as_string()))
                     elif blob.content_type == 'application/x-xz':
-                        tar_temp_file = tempfile.NamedTemporaryFile(mode='w+b', suffix='.tar.xz', delete=True)
-                        blob.download_to_file(tar_temp_file)
-                        tar_temp_file.seek(0)
-
-                        with tarfile.open(fileobj=tar_temp_file, mode='r:xz') as tar:
+                        temp_file_name = str(uuid.uuid4())
+                        blob.download_to_filename(temp_file_name)
+                        with tarfile.open(temp_file_name, mode='r:xz') as tar:
                             for member in tar.getmembers():
                                 if member.name.endswith('.json'):
                                     f = tar.extractfile(member)
                                     messages.extend(json.loads(f.read()))
 
-                        tar_temp_file.close()
+                        os.remove(temp_file_name)
                     elif blob.name.endswith('.archive.gz'):
                         messages = json.loads(zlib.decompress(blob.download_as_string(), 16 + zlib.MAX_WBITS))
                     else:
