@@ -43,9 +43,6 @@ class MessageValidator(object):
         # For every data catalog in the data catalog bucket
         for blob in self.storage_client.list_blobs(
                     self.data_catalogs_bucket_name):
-            if blob.name != 'vwt-d-gew1-odh-hub':
-                continue
-
             self.response_size = self.response_size + (blob.size / 1000000)
             blob_to_string = blob.download_as_string()
             blob_to_json = json.loads(blob_to_string)
