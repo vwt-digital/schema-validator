@@ -134,14 +134,17 @@ class MessageValidator(object):
                     if blob.content_type == 'application/json':
                         messages.extend(json.loads(blob.download_as_string()))
                     elif blob.content_type == 'application/x-xz':
-                        with tempfile.TemporaryFile(mode='w+b', suffix='.tar.xz') as tar_temp_file:
-                            blob.download_to_file(tar_temp_file)
-                            tar_temp_file.seek(0)
-                            with tarfile.open(fileobj=tar_temp_file, mode='r:xz') as tar:
-                                for member in tar.getmembers():
-                                    if member.name.endswith('.json'):
-                                        f = tar.extractfile(member)
-                                        messages.extend(json.loads(f.read()))
+                        tar_temp_file = tempfile.NamedTemporaryFile(mode='w+b', suffix='.tar.xz', delete=True)
+                        blob.download_to_file(tar_temp_file)
+                        tar_temp_file.seek(0)
+
+                        with tarfile.open(fileobj=tar_temp_file, mode='r:xz') as tar:
+                            for member in tar.getmembers():
+                                if member.name.endswith('.json'):
+                                    f = tar.extractfile(member)
+                                    messages.extend(json.loads(f.read()))
+
+                        tar_temp_file.close()
                     elif blob.name.endswith('.archive.gz'):
                         messages = json.loads(zlib.decompress(blob.download_as_string(), 16 + zlib.MAX_WBITS))
                     else:
