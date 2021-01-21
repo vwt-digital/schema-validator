@@ -13,7 +13,7 @@ def get_secret(project_id, secret_id):
         secret_id,
         'latest')
 
-    response = client.access_secret_version(secret_name)
+    response = client.access_secret_version(request={"name": secret_name})
     payload = response.payload.data.decode('utf-8')
 
     return payload

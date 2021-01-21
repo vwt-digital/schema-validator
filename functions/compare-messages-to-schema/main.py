@@ -12,7 +12,7 @@ import tempfile
 import tarfile
 from fill_refs_schema import fill_refs
 
-from google.cloud import storage, pubsub_v1
+from google.cloud import storage
 import google.auth
 from google.auth.transport import requests as gcp_requests
 from google.auth import iam
@@ -26,7 +26,6 @@ TOKEN_URI = 'https://accounts.google.com/o/oauth2/token'  # nosec
 class MessageValidator(object):
     def __init__(self):
         self.storage_client = storage.Client()
-        self.publisher = pubsub_v1.PublisherClient()
         self.schemas_bucket_name = os.environ.get('SCHEMAS_BUCKET_NAME', 'Required parameter is missing')
         self.data_catalogs_bucket_name = os.environ.get('DATA_CATALOGS_BUCKET_NAME', 'Required parameter is missing')
         self.external_credentials = request_auth_token()
