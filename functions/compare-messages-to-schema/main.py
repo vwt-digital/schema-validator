@@ -1,398 +1,254 @@
+import os
+import sys
 import logging
-import datetime
+
+import time
+import uuid
 import json
+import tarfile
 import zlib
 import jsonschema
-import os
-import config
-import atlassian
-import secretmanager
-import time
-import tarfile
-import uuid
-from fill_refs_schema import fill_refs
 
+import tickets
+import auth
+
+from datetime import datetime, timedelta
 from google.cloud import storage
-import google.auth
-from google.auth.transport import requests as gcp_requests
-from google.auth import iam
-from google.oauth2 import service_account
+from fill_refs_schema import fill_refs
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN_URI = 'https://accounts.google.com/o/oauth2/token'  # nosec
-
 
 class MessageValidator(object):
-    def __init__(self):
-        self.storage_client = storage.Client()
-        self.schemas_bucket_name = os.environ.get('SCHEMAS_BUCKET_NAME', 'Required parameter is missing')
-        self.data_catalogs_bucket_name = os.environ.get('DATA_CATALOGS_BUCKET_NAME', 'Required parameter is missing')
-        self.external_credentials = request_auth_token()
-        self.storage_client_external = storage.Client(credentials=self.external_credentials)
-        self.project_id = os.environ.get('PROJECT_ID', 'Required parameter is missing')
-        self.timeout = int(os.environ.get('TIMEOUT', 540))
-        self.validate_time_per_topic = 0
-        self.max_response_size = int(os.environ.get('MAX_RESPONSE_SIZE', 10))
-        self.response_size = 0
-        self.response_size_per_topic = 0
+    def __init__(self, topic_name, messages_bucket_name, schema, schema_tag, max_process_time, process_start_time):
+        """
+        Initializes a class for validating messages
+        """
 
-    def validate(self):
-        total_messages_not_conform_schema = []
-        # For every data catalog in the data catalog bucket
-        for blob in self.storage_client.list_blobs(
-                    self.data_catalogs_bucket_name):
-            self.response_size = self.response_size + (blob.size / 1000000)
-            blob_to_string = blob.download_as_string()
-            blob_to_json = json.loads(blob_to_string)
-            # Validate the messages that every topic with a schema has
-            messages_not_conform_schema = self.check_messages(blob_to_json)
-            total_messages_not_conform_schema.extend(messages_not_conform_schema)
-        if len(total_messages_not_conform_schema) > 0:
-            try:
-                self.create_jira_tickets(total_messages_not_conform_schema)
-            except Exception as e:
-                logging.error(f"Could not create JIRA tickets due to {e}")
+        self.topic_name = topic_name
+        self.messages_bucket_name = messages_bucket_name
+        self.schema = schema
+        self.schema_tag = schema_tag
 
-    def check_messages(self, catalog):
+        self.max_process_time = max_process_time
+        self.process_start_time = process_start_time
+
+    def validate(self, blob):
+        """
+        Validates messages from a blob against a schema
+        """
+
+        ok_status, messages = self.get_blob_messages(blob)
+        if not ok_status:
+            return [messages]
+
         messages_not_conform_schema = []
-        topics_with_schema = []
-        # Check in data catalog what topic has a schema
+
+        for msg in messages:
+            try:
+                jsonschema.validate(msg, self.schema)
+            except (jsonschema.exceptions.ValidationError, jsonschema.exceptions.SchemaError) as e:
+                msg_info = {
+                    "schema_tag": self.schema_tag,
+                    "topic_name": self.topic_name,
+                    "history_bucket": self.messages_bucket_name,
+                    "blob_full_name": blob.name,
+                    "type": "schema" if isinstance(e, jsonschema.exceptions.SchemaError) else "message",
+                    "error": e
+                }
+                if msg_info not in messages_not_conform_schema:
+                    messages_not_conform_schema.append(msg_info)
+            finally:
+                if time.time() - self.process_start_time >= self.max_process_time:
+                    break
+
+        return messages_not_conform_schema
+
+    def get_blob_messages(self, blob):
+        """
+        Retrieves the messages from the blob file
+        """
+
+        messages = []
+
+        try:
+            if blob.content_type == 'application/json':
+                messages.extend(json.loads(blob.download_as_string()))
+            elif blob.content_type == 'application/x-xz':
+                temp_directory = "/tmp"  # nosec
+                temp_file_name = f"{temp_directory}/{str(uuid.uuid4())}.tar.xz"
+
+                if not os.path.exists(temp_directory):
+                    os.makedirs(temp_directory)
+
+                blob.download_to_filename(temp_file_name)
+                with tarfile.open(temp_file_name, mode='r:xz') as tar:
+                    for member in tar.getmembers():
+                        if member.name.endswith('.json'):
+                            f = tar.extractfile(member)
+                            messages.extend(json.loads(f.read()))
+
+                os.remove(temp_file_name)
+            elif blob.name.endswith('.archive.gz'):
+                messages = json.loads(zlib.decompress(blob.download_as_string(), 16 + zlib.MAX_WBITS))
+            else:
+                logging.info(f"File format '{blob.content_type}' is not supported by the function")
+                return False, None
+        except Exception as e:
+            logging.error(f"Could not unzip blob because of {str(e)}")
+            message_not_conform_schema = {
+                "schema_tag": self.schema_tag,
+                "topic_name": self.topic_name,
+                "history_bucket": self.messages_bucket_name,
+                "blob_full_name": blob.name,
+                "type": "blob",
+                "error": f"Could not unzip blob because of {str(e)}"
+            }
+            return False, [message_not_conform_schema]
+        else:
+            return True, messages
+
+
+class TopicProcessor(object):
+    def __init__(self, stg_client, stg_client_ext, schemas_bucket_name, max_process_time, total_topics):
+        """
+        Initializes a class for processing topic data
+        """
+
+        self.stg_client = stg_client
+        self.stg_client_ext = stg_client_ext
+
+        self.max_process_time = max_process_time
+        self.total_topics = total_topics
+
+        self.schemas_bucket_name = schemas_bucket_name
+
+        yesterday = datetime.now() - timedelta(1)
+        self.bucket_prefix = datetime.strftime(yesterday, '%Y/%m/%d')
+
+    def validate_topic_messages(self, topic_schema):
+        """
+        Validates a topic schema with help from Pub/Sub backup messages
+        """
+
+        process_start_time = time.time()
+
+        topic_name = topic_schema['topic_name']
+        topic_schema_tag = topic_schema['schema_tag']
+        topic_messages_bucket_name = f"{topic_name}-history-stg"
+
+        topic_schema = self.retrieve_topic_schema(topic_schema_tag)  # Retrieve the topic schema
+        if not topic_schema:
+            logging.info(f"No valid schema found for topic '{topic_name}'")
+            return False, None
+
+        topic_blobs = list(self.stg_client_ext.list_blobs(topic_messages_bucket_name, prefix=self.bucket_prefix))
+
+        if len(topic_blobs) == 0:
+            logging.info(f"No new messages of topic '{topic_name}' were published yesterday")
+            self.update_max_process_time(process_start_time)
+            return True, []
+        else:
+            logging.info(
+                f"The messages of topic '{topic_name}' are validated against schema '{topic_schema_tag}'")
+            topic_invalid_messages = []
+
+            message_validator = MessageValidator(
+                topic_name=topic_name, messages_bucket_name=topic_messages_bucket_name, schema=topic_schema,
+                schema_tag=topic_schema_tag, max_process_time=self.max_process_time,
+                process_start_time=process_start_time)
+            for blob in topic_blobs:
+                invalid_messages = message_validator.validate(blob)
+                topic_invalid_messages.extend(invalid_messages)
+
+            self.update_max_process_time(process_start_time)
+            return True, topic_invalid_messages
+
+    def retrieve_topic_schema(self, topic_schema_tag):
+        """
+        Retrieves and parses the topic schema from a schemas bucket
+        """
+
+        schema_tag_simple = topic_schema_tag.replace('/', '_')
+
+        try:
+            schemas_bucket = self.stg_client.get_bucket(self.schemas_bucket_name)
+            schema_blob = schemas_bucket.get_blob(schema_tag_simple)
+            schema = json.loads(schema_blob.download_as_string())
+        except Exception as e:
+            logging.error(f"Could not download schema '{schema_tag_simple}' due to {e}")
+            pass
+        else:
+            return fill_refs(schema)  # Fill references within the schema
+
+    def update_max_process_time(self, start_time):
+        """
+        Updates left maximum process time for future topics
+        """
+
+        process_time_left = self.max_process_time - (time.time() - start_time)
+        self.max_process_time = self.max_process_time + (process_time_left / self.total_topics)
+
+
+def retrieve_topics_schema(bucket):
+    """
+    Retrieves the info of all data-catalogs topics with a valid schema
+    """
+
+    catalog_topics = []
+
+    for blob in bucket.list_blobs():
+        catalog = json.loads(blob.download_as_string())
+
         for dataset in catalog['dataset']:
             for dist in dataset.get('distribution', []):
                 if dist.get('format') == 'topic':
-                    # Get dataset topic only if it has a schema
                     if 'describedBy' in dist and 'describedByType' in dist:
-                        # Get schema tag and topic title
-                        schema_tag = dist.get('describedBy')
-                        topic_name = dist.get('title', 'unknown')
-                        # Put them in JSON
-                        topic_schema_info = {
-                            "schema_tag": schema_tag,
-                            "topic_name": topic_name
-                        }
-                        # Add info to list
-                        topics_with_schema.append(topic_schema_info)
+                        catalog_topics.append({
+                            "schema_tag": dist['describedBy'],
+                            "topic_name": dist.get('title', 'unknown')
+                        })
 
-        # Set time to check per topic
-        # It's the total time the function can take minus half a minute divided by the total number of topics
-        # Also set max response mb per topic for the blobs
-        if len(topics_with_schema) > 0:
-            self.validate_time_per_topic = (self.timeout - 30)/len(topics_with_schema)
-            response_size_now = self.response_size
-            self.response_size_per_topic = (self.max_response_size - response_size_now) / len(topics_with_schema)
-            self.response_size_per_topic = self.response_size_per_topic
-            self.response_size = 0
-        topics_checked = 0
-        # For every topic with a schema
-        for ts in topics_with_schema:
-            topic_checked = False
-            logging.info("The messages of topic {} are validated against schema {}".format(
-                ts['topic_name'], ts['schema_tag']))
-            # There is a history storage bucket
-            ts_history_bucket_name = ts['topic_name'] + "-history-stg"
-            schema_bucket = self.storage_client.get_bucket(self.schemas_bucket_name)
-            # Get schema from schema bucket belonging to this topic
-            schema_tag_simple = ts['schema_tag'].replace('/', '_')
-            try:
-                schema = schema_bucket.get_blob(schema_tag_simple)
-                schema = json.loads(schema.download_as_string())
-            except Exception as e:
-                logging.error(f"Could not download schema {schema_tag_simple} as string due to {e}")
-            # Now fill in the references in the schema
-            schema = fill_refs(schema)
-            # Want to check the messages of the previous day
-            yesterday = datetime.date.today()-datetime.timedelta(1)
-            year = yesterday.year
-            month = '{:02d}'.format(yesterday.month)
-            day = '{:02d}'.format(yesterday.day)
-            bucket_folder = '{}/{}/{}'.format(year, month, day)
-            blob_exists = False
-            start_time = time.time()
-            # For every blob in this bucket
-            msgs_not_conform_schema = False
-            blobs_checked = 0
-            for blob in self.storage_client_external.list_blobs(
-                        ts_history_bucket_name, prefix=bucket_folder):
-                blobs_checked = blobs_checked + 1
-                blob_exists = True
-                blob_full_name = blob.name
-                blob_size = blob.size / 1000000
-                self.response_size = self.response_size + blob_size
-                try:
-                    # Check if response size is already over max response size
-                    # And at least one blob has already been checked
-                    if self.response_size >= self.response_size_per_topic and blobs_checked > 1:
-                        logging.info("Max response size for this topic is reached")
-                        self.response_size = 0
-                        break
-                except Exception as e:
-                    logging.error(f"Could not download blob as string due to {e}")
-
-                messages = []
-                try:
-                    if blob.content_type == 'application/json':
-                        messages.extend(json.loads(blob.download_as_string()))
-                    elif blob.content_type == 'application/x-xz':
-                        temp_directory = "/tmp"  # nosec
-                        temp_file_name = f"{temp_directory}/{str(uuid.uuid4())}.tar.xz"
-
-                        if not os.path.exists(temp_directory):
-                            os.makedirs(temp_directory)
-
-                        blob.download_to_filename(temp_file_name)
-                        with tarfile.open(temp_file_name, mode='r:xz') as tar:
-                            for member in tar.getmembers():
-                                if member.name.endswith('.json'):
-                                    f = tar.extractfile(member)
-                                    messages.extend(json.loads(f.read()))
-
-                        os.remove(temp_file_name)
-                    elif blob.name.endswith('.archive.gz'):
-                        messages = json.loads(zlib.decompress(blob.download_as_string(), 16 + zlib.MAX_WBITS))
-                    else:
-                        logging.info(f"File format '{blob.content_type}' is not supported by the function")
-                        continue
-                except Exception as e:
-                    logging.error(f"Could not unzip blob because of {e}")
-                    messages_not_conform_schema.append({
-                        "schema_tag": ts['schema_tag'],
-                        "topic_name": ts['topic_name'],
-                        "history_bucket": ts_history_bucket_name,
-                        "blob_full_name": blob_full_name,
-                        "type": "blob",
-                        "error": f"Could not unzip blob because of {e}"
-                    })
-                    continue
-
-                # Get its messages
-                for msg in messages:
-                    try:
-                        # Check if the time is already over the max time
-                        if time.time() - start_time >= self.validate_time_per_topic:
-                            break
-                        if topic_checked is False:
-                            topics_checked = topics_checked + 1
-                            topic_checked = True
-                        # Validate every message against the schema of the topic
-                        # of the bucket
-                        jsonschema.validate(msg, schema)
-                    except (jsonschema.exceptions.ValidationError, jsonschema.exceptions.SchemaError) as e:
-                        msgs_not_conform_schema = True
-                        msg_info = {
-                            "schema_tag": ts['schema_tag'],
-                            "topic_name": ts['topic_name'],
-                            "history_bucket": ts_history_bucket_name,
-                            "blob_full_name": blob_full_name,
-                            "type": "schema" if isinstance(e, jsonschema.exceptions.SchemaError) else "message",
-                            "error": e
-                        }
-                        if msg_info not in messages_not_conform_schema:
-                            messages_not_conform_schema.append(msg_info)
-                # Check if the time is already over the max time
-                # Or response size is already over max response size
-                if time.time() - start_time >= self.validate_time_per_topic or \
-                   self.response_size >= self.response_size_per_topic:
-                    logging.info("Too many messages uploaded yesterday, did not check all. "
-                                 "The ones that were checked are conform schema.")
-                    self.response_size = 0
-                    break
-            if blob_exists is False:
-                logging.info("No new messages were published yesterday")
-                topics_checked = topics_checked + 1
-            elif msgs_not_conform_schema:
-                logging.info('Topic contains messages that are not conform schema')
-            else:
-                logging.info("Messages are conform schema")
-        # Check if for all topics at least one message has been validated
-        if topics_checked is not len(topics_with_schema):
-            logging.error("At least one message per topic should be validated, check if validate_time_per_topic"
-                          " and/or response_size_per_topic are high enough")
-        return messages_not_conform_schema
-
-    def create_jira_tickets(self, messages_not_conform_schema):
-        # Jira config
-        jira_user = config.JIRA_USER
-        jira_server = config.JIRA_SERVER
-        jira_project = config.JIRA_PROJECT
-        jira_projects = config.JIRA_PROJECTS
-        jira_board = config.JIRA_BOARD
-        jira_api_key = secretmanager.get_secret(
-            self.project_id,
-            config.JIRA_SECRET_ID)
-
-        client = atlassian.jira_init(jira_user, jira_api_key, jira_server)
-
-        # Get current sprint
-        sprint_id = atlassian.get_current_sprint(client, jira_board)
-
-        jira_projects_list = jira_projects.split('+')
-        logging.info(f"Possibly creating or updating tickets for sprint {sprint_id} of projects {jira_projects_list}...")
-
-        # Jira jql to find tickets that already exist conform these issues
-        jql_prefix = "type = Bug AND status != Done AND status != Cancelled " \
-            "AND text ~ \"Message not conform schema\" " \
-            "AND project = "
-        projects = [jql_prefix + project for project in jira_projects_list]
-        jql = " OR ".join(projects)
-        jql = f"{jql} ORDER BY priority DESC "
-
-        made_comments = []
-        # For every message that is not conform the schema of its topic
-        for msg_info in messages_not_conform_schema:
-            # Make issue
-            if msg_info['type'] == 'message':
-                title = "Messages not conform schema: topic '{}' schema '{}'".format(
-                    msg_info['topic_name'], msg_info['schema_tag'])
-                # Error information
-                e = msg_info['error']
-
-                error_message = e.message
-                error_absolute_schema_path = f"{list(e.absolute_schema_path)}"
-                error_absolute_path = f"{list(e.absolute_path)}"
-                error_value = f"{e.validator} '{e.validator_value}'"
-                instance = f"{e.instance}"
-                error = error_message.replace(f"{instance} ", "")
-                # Check if the error was already commented in this session
-                comment_info = {
-                    "error_absolute_path": error_absolute_path,
-                    "error_absolute_schema_path": error_absolute_schema_path,
-                    "error_value": error_value,
-                    "title": title
-                }
-                # If it is, skip the message
-                if comment_info in made_comments:
-                    continue
-
-                # Make comment
-                comment_place = f"Wrong message can be found in blob {msg_info['blob_full_name']}" + \
-                                f" in history bucket {msg_info['history_bucket']}"
-                comment_error_msg_key = f"\nThe error in the message can be found in key: {error_absolute_path}"
-                comment_error = f"\nThe error for this key is: {error}"
-                comment_schema_key = f"\nIn the schema, the error can be found in key: {error_absolute_schema_path}"
-                comment = comment_place + comment_error_msg_key + comment_error + comment_schema_key
-            elif msg_info['type'] == 'schema':
-                title = "Schema not conform correct format: topic '{}' schema '{}'".format(
-                    msg_info['topic_name'], msg_info['schema_tag'])
-                # Error information
-                e = msg_info['error']
-
-                error_message = e.message
-                error_absolute_schema_path = f"{list(e.schema_path)}"
-                error_value = f"{e.validator} '{e.validator_value}'"
-                instance = f"{e.instance}"
-                error = error_message.replace(f"{instance} ", "")
-                # Check if the error was already commented in this session
-                comment_info = {
-                    "error_absolute_path": None,
-                    "error_absolute_schema_path": error_absolute_schema_path,
-                    "error_value": error_value,
-                    "title": title
-                }
-                # If it is, skip the message
-                if comment_info in made_comments:
-                    continue
-
-                # Make comment
-                comment = f"\nThe error for this schema is: {error} \nThe error can be found in key: {error_absolute_schema_path}"
-            elif msg_info['type'] == 'blob':
-                title = "Blob could not be parsed: topic '{}' schema '{}'".format(
-                    msg_info['topic_name'], msg_info['schema_tag'])
-                # Error information
-                e = msg_info['error']
-
-                comment_info = {
-                    "error_absolute_path": None,
-                    "error_absolute_schema_path": None,
-                    "error_value": e,
-                    "title": title
-                }
-                made_comments.append(comment_info)
-
-                comment_place = f"Wrong blob {msg_info['blob_full_name']} is in history bucket {msg_info['history_bucket']}"
-                comment_error = f"\nThe error for parsing this blob is: {e}"
-                comment = comment_place + comment_error
-            else:
-                continue
-
-            # Get issues that are already conform the 'issue template'
-            titles = atlassian.list_issue_titles(client, jql)
-            # Check if Jira ticket already exists for this topic with this schema
-            if title not in titles:
-                description = f"The topic `{msg_info['topic_name']}` received messages" + \
-                              f" that are not conform its schema ({msg_info['schema_tag']})." + \
-                              " The messages with their errors can be found in the comments of this ticket" + \
-                              " Please check why the messages are not conform the schema. "
-                logging.info(f"Creating jira ticket: {title}")
-                # Create a Jira ticket
-                issue = atlassian.create_issue(
-                    client=client,
-                    project=jira_project,
-                    title=title,
-                    description=description)
-                # Add comment to jira ticket
-                made_comments.append(comment_info)
-                atlassian.add_comment(client, issue, comment)
-                # Add Jira ticket to sprint
-                atlassian.add_to_sprint(client, sprint_id, issue.key)
-            # If it does exist, add a comment with the message and its error
-            else:
-                # Check if the error message has not already been created in this session
-                if comment_info not in made_comments:
-                    # Add comment to made comments in this session
-                    made_comments.append(comment_info)
-                    # Get issues with title
-                    jql_prefix_titles = f"type = Bug AND status != Done AND status != Cancelled " \
-                        f"AND text ~ \"{title}\" " \
-                        "AND project = "
-                    projects_titles = [jql_prefix_titles + project for project in jira_projects_list]
-                    jql_titles = " OR ".join(projects_titles)
-                    jql_titles = f"{jql_titles} ORDER BY priority DESC "
-                    issues = atlassian.list_issues(client, jql_titles)
-                    # For every issue with this title
-                    for issue in issues:
-                        # Get comments of issues
-                        issue_id = atlassian.get_issue_id(client, issue)
-                        issue_comment_ids = atlassian.list_issue_comment_ids(client, issue_id)
-                        comment_not_yet_exists = True
-                        for comment_id in issue_comment_ids:
-                            # Check if the comment without where to find it does not yet exist
-                            comment_body = atlassian.get_comment_body(client, issue, comment_id)
-                            if comment_error_msg_key in comment_body \
-                                    and comment_error in comment_body \
-                                    and comment_schema_key in comment_body:
-                                comment_not_yet_exists = False
-                                break
-                        if comment_not_yet_exists:
-                            logging.info(f"Updating jira ticket: {title}")
-                            # Add comment to jira ticket
-                            atlassian.add_comment(client, issue_id, comment)
-
-
-def request_auth_token():
-    try:
-        credentials, project_id = google.auth.default(scopes=['https://www.googleapis.com/auth/iam'])
-
-        request = gcp_requests.Request()
-        credentials.refresh(request)
-
-        signer = iam.Signer(request, credentials, config.DELEGATED_SA)
-        creds = service_account.Credentials(
-            signer=signer,
-            service_account_email=config.DELEGATED_SA,
-            token_uri=TOKEN_URI,
-            scopes=['https://www.googleapis.com/auth/cloud-platform'],
-            subject=config.DELEGATED_SA)
-    except Exception:
-        raise
-
-    return creds
+    return catalog_topics
 
 
 def validate_messages(request):
     logging.info("Initialized function")
 
-    MessageValidator().validate()
+    try:
+        catalogs_bucket_name = os.environ.get('DATA_CATALOGS_BUCKET_NAME')
+        schemas_bucket_name = os.environ.get('SCHEMAS_BUCKET_NAME')
+        timeout = int(os.environ.get('TIMEOUT', 540))
+    except KeyError as e:
+        logging.error(f"Function is missing required environment variable: {str(e)}")
+        sys.exit(1)
+    else:
+        stg_client = storage.Client()
+        stg_client_ext = storage.Client(credentials=auth.request_auth_token())
+
+        topic_schemas = retrieve_topics_schema(bucket=stg_client.get_bucket(catalogs_bucket_name))
+        if len(topic_schemas) == 0:
+            logging.info("No topics to process")
+        else:
+            invalid_messages = []
+            validation_time_per_topic = (timeout - 30) / len(topic_schemas)
+
+            topic_processor = TopicProcessor(
+                stg_client=stg_client, stg_client_ext=stg_client_ext, schemas_bucket_name=schemas_bucket_name,
+                max_process_time=validation_time_per_topic, total_topics=len(topic_schemas))
+
+            for topic_schema in topic_schemas:
+                ok_status, topic_invalid_messages = topic_processor.validate_topic_messages(
+                    topic_schema)  # Validate messages for topic
+
+                if ok_status:
+                    invalid_messages.extend(topic_invalid_messages)
+
+            if len(invalid_messages) > 0:
+                try:
+                    tickets.create_jira_tickets(invalid_messages)
+                except Exception as e:
+                    logging.error(f"Could not create JIRA tickets due to {e}")
 
 
 if __name__ == '__main__':
