@@ -1,29 +1,36 @@
 import os
 import sys
+import io
 import logging
 
 import time
-import uuid
+import re
 import json
-import tarfile
-import zlib
+import lzma
 import jsonschema
+
+import google.auth
+import google.auth.transport.requests as tr_requests
 
 import tickets
 import auth
 
 from datetime import datetime, timedelta
 from google.cloud import storage
+from google.resumable_media.requests import ChunkedDownload
 from fill_refs_schema import fill_refs
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("google.resumable_media._helpers").setLevel(level=logging.ERROR)
 
 
 class MessageValidator(object):
-    def __init__(self, topic_name, messages_bucket_name, schema, schema_tag, max_process_time, process_start_time):
+    def __init__(self, stg_client, topic_name, messages_bucket_name, schema, schema_tag, max_process_time, process_start_time):
         """
         Initializes a class for validating messages
         """
+
+        self.stg_client = stg_client
 
         self.topic_name = topic_name
         self.messages_bucket_name = messages_bucket_name
@@ -33,18 +40,63 @@ class MessageValidator(object):
         self.max_process_time = max_process_time
         self.process_start_time = process_start_time
 
+        self.credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/devstorage.read_write'])
+        self.transport = tr_requests.AuthorizedSession(self.credentials)
+
     def validate(self, blob):
         """
         Validates messages from a blob against a schema
         """
 
-        ok_status, messages = self.get_blob_messages(blob)
-        if not ok_status:
-            return [messages]
+        if blob.content_type != 'application/x-xz':
+            return
 
         messages_not_conform_schema = []
 
-        for msg in messages:
+        try:
+            media_url = blob.generate_signed_url(
+                expiration=timedelta(seconds=self.max_process_time), method="GET", version='v4')
+            chunk_size = 512000  # 500KB
+            stream = io.BytesIO()
+            count = 0
+
+            download = ChunkedDownload(media_url, chunk_size, stream)
+            lzd = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=52428800)
+
+            last_json = None
+
+            while not download.finished:
+                response = download.consume_next_chunk(self.transport)
+                decoded_data = lzd.decompress(response.content).decode('utf-8')
+
+                if count == 0:
+                    decoded_data = re.sub(r'^.*?\[\{', '[{', decoded_data)
+
+                if last_json:
+                    decoded_data = last_json + decoded_data
+
+                new_messages_not_conform_schema, last_json = self.validate_dirty_json(decoded_data, blob.name)
+                messages_not_conform_schema.extend(new_messages_not_conform_schema)
+                count += 1
+        except Exception as e:
+            logging.error(f"Could not unzip blob because of {str(e)}")
+            messages_not_conform_schema.append({
+                "schema_tag": self.schema_tag,
+                "topic_name": self.topic_name,
+                "history_bucket": self.messages_bucket_name,
+                "blob_full_name": blob.name,
+                "type": "blob",
+                "error": f"Could not unzip blob because of {str(e)}"
+            })
+
+        return messages_not_conform_schema
+
+    def validate_dirty_json(self, dirty_json, blob_name):
+        messages_not_conform_schema = []
+
+        parsed_json, last_json = self.parse_dirty_json(dirty_json)
+
+        for msg in parsed_json:
             try:
                 jsonschema.validate(msg, self.schema)
             except (jsonschema.exceptions.ValidationError, jsonschema.exceptions.SchemaError) as e:
@@ -52,9 +104,9 @@ class MessageValidator(object):
                     "schema_tag": self.schema_tag,
                     "topic_name": self.topic_name,
                     "history_bucket": self.messages_bucket_name,
-                    "blob_full_name": blob.name,
+                    "blob_full_name": blob_name,
                     "type": "schema" if isinstance(e, jsonschema.exceptions.SchemaError) else "message",
-                    "error": e
+                    "error": str(e)
                 }
                 if msg_info not in messages_not_conform_schema:
                     messages_not_conform_schema.append(msg_info)
@@ -62,51 +114,45 @@ class MessageValidator(object):
                 if time.time() - self.process_start_time >= self.max_process_time:
                     break
 
-        return messages_not_conform_schema
+        return messages_not_conform_schema, last_json
 
-    def get_blob_messages(self, blob):
+    def parse_dirty_json(self, dirty_json):
         """
-        Retrieves the messages from the blob file
+        Parse a dirty string towards a list of JSON objects
         """
 
-        messages = []
+        current_bracket_count = 0
+        current_bracket_string = ''
 
-        try:
-            if blob.content_type == 'application/json':
-                messages.extend(json.loads(blob.download_as_string()))
-            elif blob.content_type == 'application/x-xz':
-                temp_directory = "/tmp"  # nosec
-                temp_file_name = f"{temp_directory}/{str(uuid.uuid4())}.tar.xz"
+        bracket_strings = []
+        for i, v in enumerate(dirty_json):
+            current_bracket_string = current_bracket_string + v
 
-                if not os.path.exists(temp_directory):
-                    os.makedirs(temp_directory)
+            if v == "{":
+                current_bracket_count += 1
+            if v == "}":
+                current_bracket_count -= 1
 
-                blob.download_to_filename(temp_file_name)
-                with tarfile.open(temp_file_name, mode='r:xz') as tar:
-                    for member in tar.getmembers():
-                        if member.name.endswith('.json'):
-                            f = tar.extractfile(member)
-                            messages.extend(json.loads(f.read()))
+            if current_bracket_count == 0:
+                bracket_strings.append(current_bracket_string)
+                current_bracket_string = ''
 
-                os.remove(temp_file_name)
-            elif blob.name.endswith('.archive.gz'):
-                messages = json.loads(zlib.decompress(blob.download_as_string(), 16 + zlib.MAX_WBITS))
+            if time.time() - self.process_start_time >= self.max_process_time:
+                break
+
+        parsed_json = []
+        for string in bracket_strings:
+            try:
+                json_data = json.loads(string)
+            except json.decoder.JSONDecodeError:
+                continue
             else:
-                logging.info(f"File format '{blob.content_type}' is not supported by the function")
-                return False, None
-        except Exception as e:
-            logging.error(f"Could not unzip blob because of {str(e)}")
-            message_not_conform_schema = {
-                "schema_tag": self.schema_tag,
-                "topic_name": self.topic_name,
-                "history_bucket": self.messages_bucket_name,
-                "blob_full_name": blob.name,
-                "type": "blob",
-                "error": f"Could not unzip blob because of {str(e)}"
-            }
-            return False, [message_not_conform_schema]
-        else:
-            return True, messages
+                parsed_json.append(json_data)
+            finally:
+                if time.time() - self.process_start_time >= self.max_process_time:
+                    break
+
+        return parsed_json, bracket_strings[-1]
 
 
 class TopicProcessor(object):
@@ -154,8 +200,8 @@ class TopicProcessor(object):
             topic_invalid_messages = []
 
             message_validator = MessageValidator(
-                topic_name=topic_name, messages_bucket_name=topic_messages_bucket_name, schema=topic_schema,
-                schema_tag=topic_schema_tag, max_process_time=self.max_process_time,
+                stg_client=self.stg_client_ext, topic_name=topic_name, messages_bucket_name=topic_messages_bucket_name,
+                schema=topic_schema, schema_tag=topic_schema_tag, max_process_time=self.max_process_time,
                 process_start_time=process_start_time)
             for blob in topic_blobs:
                 invalid_messages = message_validator.validate(blob)
@@ -185,6 +231,9 @@ class TopicProcessor(object):
         """
         Updates left maximum process time for future topics
         """
+
+        if self.total_topics > 1:
+            self.total_topics = self.total_topics - 1
 
         process_time_left = self.max_process_time - (time.time() - start_time)
         self.max_process_time = self.max_process_time + (process_time_left / self.total_topics)
