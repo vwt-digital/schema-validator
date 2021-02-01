@@ -4,7 +4,7 @@ import atlassian
 import logging
 
 
-def create_jira_tickets(self, messages_not_conform_schema):
+def create_jira_tickets(messages_not_conform_schema, project_id):
     # Jira config
     jira_user = config.JIRA_USER
     jira_server = config.JIRA_SERVER
@@ -12,7 +12,7 @@ def create_jira_tickets(self, messages_not_conform_schema):
     jira_projects = config.JIRA_PROJECTS
     jira_board = config.JIRA_BOARD
     jira_api_key = secretmanager.get_secret(
-        self.project_id,
+        project_id,
         config.JIRA_SECRET_ID)
 
     client = atlassian.jira_init(jira_user, jira_api_key, jira_server)

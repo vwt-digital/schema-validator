@@ -9,7 +9,6 @@ import json
 import lzma
 import jsonschema
 
-import google.auth
 import google.auth.transport.requests as tr_requests
 
 import tickets
@@ -25,12 +24,12 @@ logging.getLogger("google.resumable_media._helpers").setLevel(level=logging.ERRO
 
 
 class MessageValidator(object):
-    def __init__(self, stg_client, topic_name, messages_bucket_name, schema, schema_tag, max_process_time, process_start_time):
+    def __init__(self, credentials_ext, topic_name, messages_bucket_name, schema, schema_tag, max_process_time, process_start_time):
         """
         Initializes a class for validating messages
         """
 
-        self.stg_client = stg_client
+        self.credentials = credentials_ext
 
         self.topic_name = topic_name
         self.messages_bucket_name = messages_bucket_name
@@ -40,7 +39,6 @@ class MessageValidator(object):
         self.max_process_time = max_process_time
         self.process_start_time = process_start_time
 
-        self.credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/devstorage.read_write'])
         self.transport = tr_requests.AuthorizedSession(self.credentials)
 
     def validate(self, blob):
@@ -78,6 +76,9 @@ class MessageValidator(object):
                 new_messages_not_conform_schema, last_json = self.validate_dirty_json(decoded_data, blob.name)
                 messages_not_conform_schema.extend(new_messages_not_conform_schema)
                 count += 1
+
+                if time.time() - self.process_start_time >= self.max_process_time:
+                    break
         except Exception as e:
             logging.error(f"Could not unzip blob because of {str(e)}")
             messages_not_conform_schema.append({
@@ -121,48 +122,68 @@ class MessageValidator(object):
         Parse a dirty string towards a list of JSON objects
         """
 
+        bracket_strings, timed_out = self.divide_string(dirty_json)  # Divide string into json chunks
+
+        parsed_json = []
+        unparsed_json = []
+        for string in bracket_strings:
+            try:
+                json_data = json.loads(string)
+            except json.decoder.JSONDecodeError:
+                unparsed_json.append(string)
+                break
+            else:
+                parsed_json.append(json_data)
+            finally:
+                if time.time() - self.process_start_time >= self.max_process_time:
+                    timed_out = True
+                    break
+
+        last_json = None if timed_out or len(unparsed_json) == 0 else ''.join(unparsed_json)
+        return parsed_json, last_json
+
+    def divide_string(self, string):
+        """
+        Divide string based on { ... } format
+        """
+
+        timed_out = False
         current_bracket_count = 0
         current_bracket_string = ''
 
         bracket_strings = []
-        for i, v in enumerate(dirty_json):
-            current_bracket_string = current_bracket_string + v
-
+        for i, v in enumerate(string):
             if v == "{":
                 current_bracket_count += 1
             if v == "}":
                 current_bracket_count -= 1
 
-            if current_bracket_count == 0:
-                bracket_strings.append(current_bracket_string)
+            if current_bracket_count > 0:
+                current_bracket_string = current_bracket_string + v
+
+            if current_bracket_count == 0 and len(current_bracket_string) > 0:
+                bracket_strings.append(current_bracket_string + v)
                 current_bracket_string = ''
 
             if time.time() - self.process_start_time >= self.max_process_time:
+                timed_out = True
                 break
 
-        parsed_json = []
-        for string in bracket_strings:
-            try:
-                json_data = json.loads(string)
-            except json.decoder.JSONDecodeError:
-                continue
-            else:
-                parsed_json.append(json_data)
-            finally:
-                if time.time() - self.process_start_time >= self.max_process_time:
-                    break
+        if len(current_bracket_string) > 0 and not timed_out:
+            bracket_strings.append(current_bracket_string)
 
-        return parsed_json, bracket_strings[-1]
+        return bracket_strings, timed_out
 
 
 class TopicProcessor(object):
-    def __init__(self, stg_client, stg_client_ext, schemas_bucket_name, max_process_time, total_topics):
+    def __init__(self, stg_client, stg_client_ext, credentials_ext, schemas_bucket_name, max_process_time, total_topics):
         """
         Initializes a class for processing topic data
         """
 
         self.stg_client = stg_client
         self.stg_client_ext = stg_client_ext
+        self.credentials_ext = credentials_ext
 
         self.max_process_time = max_process_time
         self.total_topics = total_topics
@@ -200,7 +221,7 @@ class TopicProcessor(object):
             topic_invalid_messages = []
 
             message_validator = MessageValidator(
-                stg_client=self.stg_client_ext, topic_name=topic_name, messages_bucket_name=topic_messages_bucket_name,
+                credentials_ext=self.credentials_ext, topic_name=topic_name, messages_bucket_name=topic_messages_bucket_name,
                 schema=topic_schema, schema_tag=topic_schema_tag, max_process_time=self.max_process_time,
                 process_start_time=process_start_time)
             for blob in topic_blobs:
@@ -272,8 +293,10 @@ def validate_messages(request):
         logging.error(f"Function is missing required environment variable: {str(e)}")
         sys.exit(1)
     else:
+        credentials_ext, project_id = auth.request_auth_token()
+
         stg_client = storage.Client()
-        stg_client_ext = storage.Client(credentials=auth.request_auth_token())
+        stg_client_ext = storage.Client(credentials=credentials_ext)
 
         topic_schemas = retrieve_topics_schema(bucket=stg_client.get_bucket(catalogs_bucket_name))
         if len(topic_schemas) == 0:
@@ -283,19 +306,19 @@ def validate_messages(request):
             validation_time_per_topic = (timeout - 30) / len(topic_schemas)
 
             topic_processor = TopicProcessor(
-                stg_client=stg_client, stg_client_ext=stg_client_ext, schemas_bucket_name=schemas_bucket_name,
-                max_process_time=validation_time_per_topic, total_topics=len(topic_schemas))
+                stg_client=stg_client, stg_client_ext=stg_client_ext, credentials_ext=credentials_ext,
+                schemas_bucket_name=schemas_bucket_name, max_process_time=validation_time_per_topic,
+                total_topics=len(topic_schemas))
 
             for topic_schema in topic_schemas:
-                ok_status, topic_invalid_messages = topic_processor.validate_topic_messages(
-                    topic_schema)  # Validate messages for topic
+                ok_status, topic_invalid_messages = topic_processor.validate_topic_messages(topic_schema)  # Validate messages for topic
 
                 if ok_status:
                     invalid_messages.extend(topic_invalid_messages)
 
             if len(invalid_messages) > 0:
                 try:
-                    tickets.create_jira_tickets(invalid_messages)
+                    tickets.create_jira_tickets(invalid_messages, project_id)
                 except Exception as e:
                     logging.error(f"Could not create JIRA tickets due to {e}")
 

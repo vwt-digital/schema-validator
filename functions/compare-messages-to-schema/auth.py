@@ -25,4 +25,4 @@ def request_auth_token():
     except Exception:
         raise
 
-    return creds
+    return creds, project_id
