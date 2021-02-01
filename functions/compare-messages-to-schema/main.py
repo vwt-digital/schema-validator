@@ -1,5 +1,4 @@
 import os
-import sys
 import io
 import logging
 
@@ -291,7 +290,7 @@ def validate_messages(request):
         timeout = int(os.environ.get('TIMEOUT', 540))
     except KeyError as e:
         logging.error(f"Function is missing required environment variable: {str(e)}")
-        sys.exit(1)
+        return 'Bad Request', 400
     else:
         credentials_ext, project_id = auth.request_auth_token()
 
@@ -321,6 +320,9 @@ def validate_messages(request):
                     tickets.create_jira_tickets(invalid_messages, project_id)
                 except Exception as e:
                     logging.error(f"Could not create JIRA tickets due to {e}")
+                    return 'Bad Request', 400
+
+    return 'OK', 204
 
 
 if __name__ == '__main__':
