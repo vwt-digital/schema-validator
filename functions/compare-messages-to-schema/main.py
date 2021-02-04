@@ -106,7 +106,7 @@ class MessageValidator(object):
                     "history_bucket": self.messages_bucket_name,
                     "blob_full_name": blob_name,
                     "type": "schema" if isinstance(e, jsonschema.exceptions.SchemaError) else "message",
-                    "error": str(e)
+                    "error": e
                 }
                 if msg_info not in messages_not_conform_schema:
                     messages_not_conform_schema.append(msg_info)
