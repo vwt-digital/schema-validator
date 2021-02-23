@@ -53,7 +53,7 @@ class MessageValidator(object):
         try:
             media_url = blob.generate_signed_url(
                 expiration=timedelta(seconds=self.max_process_time), method="GET", version='v4')
-            chunk_size = 512000  # 500KB
+            chunk_size = 256000  # 250KB
             stream = io.BytesIO()
             count = 0
 
