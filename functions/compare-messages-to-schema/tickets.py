@@ -1,12 +1,15 @@
+import json
 import logging
 
 import config
+from gobits import Gobits
+from google.cloud import pubsub_v1
 
 import atlassian
 import secretmanager
 
 
-def create_jira_tickets(messages_not_conform_schema, project_id):
+def create_jira_tickets(messages_not_conform_schema, project_id, request):
     # Jira config
     jira_user = config.JIRA_USER
     jira_server = config.JIRA_SERVER
@@ -149,6 +152,18 @@ def create_jira_tickets(messages_not_conform_schema, project_id):
             atlassian.add_comment(client, issue, comment)
             # Add Jira ticket to sprint
             atlassian.add_to_sprint(client, sprint_id, issue.key)
+
+            # Publish message to topic
+            # Temporary until full move to formatting/interface
+            metadata = Gobits.from_request(request=request).to_json()
+            publisher = pubsub_v1.PublisherClient()
+            prep_message = {"gobits": [metadata], "data": description}
+
+            if config.TOPIC_NAME:
+                future = publisher.publish(
+                    config.TOPIC_NAME, json.dumps(prep_message).encode("utf-8")
+                )
+                logging.info(f"Published message with id {future.result()}")
         # If it does exist, add a comment with the message and its error
         else:
             # Check if the error message has not already been created in this session

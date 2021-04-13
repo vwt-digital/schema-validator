@@ -10,8 +10,7 @@ from datetime import datetime, timedelta
 import config
 import google.auth.transport.requests as tr_requests
 import jsonschema
-from gobits import Gobits
-from google.cloud import pubsub_v1, storage
+from google.cloud import storage
 from google.resumable_media.requests import ChunkedDownload
 
 import auth
@@ -115,7 +114,10 @@ class MessageValidator(object):
         for msg in parsed_json:
             try:
                 jsonschema.validate(msg, self.schema)
-            except jsonschema.exceptions.ValidationError as e:
+            except (
+                jsonschema.exceptions.ValidationError,
+                jsonschema.exceptions.SchemaError,
+            ) as e:
                 msg_info = {
                     "schema_tag": self.schema_tag,
                     "topic_name": self.topic_name,
@@ -125,19 +127,6 @@ class MessageValidator(object):
                     if isinstance(e, jsonschema.exceptions.SchemaError)
                     else "message",
                     "error": e,
-                }
-                if msg_info not in messages_not_conform_schema:
-                    messages_not_conform_schema.append(msg_info)
-            except jsonschema.exceptions.SchemaError as e:
-                msg_info = {
-                    "schema_tag": self.schema_tag,
-                    "topic_name": self.topic_name,
-                    "history_bucket": self.messages_bucket_name,
-                    "blob_full_name": blob_name,
-                    "type": "schema"
-                    if isinstance(e, jsonschema.exceptions.SchemaError)
-                    else "message",
-                    "error": "Schema is invalid under its corresponding metaschema",
                 }
                 if msg_info not in messages_not_conform_schema:
                     messages_not_conform_schema.append(msg_info)
@@ -386,23 +375,8 @@ def validate_messages(request):
                 invalid_messages.extend(topic_invalid_messages)
 
         if len(invalid_messages) > 0:
-            # Temporary until full move to formatting/interface
-            metadata = Gobits.from_request(request=request).to_json()
-            publisher = pubsub_v1.PublisherClient()
-            for message in invalid_messages:
-
-                prep_message = {"gobits": [metadata], "data": message}
-
-                logging.info(f"Message ready for publishing: {prep_message}")
-
-                if config.TOPIC_NAME:
-                    future = publisher.publish(
-                        config.TOPIC_NAME, json.dumps(prep_message).encode("utf-8")
-                    )
-                    logging.info(f"Published message with id {future.result()}")
-
             try:
-                tickets.create_jira_tickets(invalid_messages, project_id)
+                tickets.create_jira_tickets(invalid_messages, project_id, request)
             except Exception as e:
                 logging.error(f"Could not create JIRA tickets due to {e}")
                 return "Bad Request", 400
