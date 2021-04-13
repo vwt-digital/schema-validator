@@ -1,3 +1,6 @@
 venv/
 startup.sh
 delete_issue.py
+*config.py
+config*.py
+fill_refs_schema.py
