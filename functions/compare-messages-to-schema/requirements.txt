@@ -4,7 +4,8 @@ certifi==2020.12.5
 cffi==1.14.5
 chardet==4.0.0
 cryptography==3.4.7
-decorator==5.0.1
+dataclasses==0.6
+decorator==5.0.6
 defusedxml==0.7.1
 gobits==1.0.8
 google-api-core==1.26.3
@@ -22,6 +23,7 @@ grpc-google-iam-v1==0.12.3
 grpcio==1.36.1
 httplib2==0.19.1
 idna==2.10
+importlib-metadata==3.10.1
 jira==2.0.0
 jsonschema==3.2.0
 libcst==0.3.18
@@ -30,7 +32,7 @@ oauthlib==3.1.0
 packaging==20.9
 pbr==5.5.1
 proto-plus==1.18.1
-protobuf==3.15.6
+protobuf==3.15.8
 py==1.10.0
 pyasn1==0.4.8
 pyasn1-modules==0.2.8
@@ -51,3 +53,4 @@ typing-inspect==0.6.0
 uritemplate==3.0.1
 urllib3==1.26.4
 Werkzeug==1.0.1
+zipp==3.4.1
