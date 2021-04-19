@@ -37,7 +37,7 @@ def create_issue(msg_info, made_comments):
         }
         # If it is, skip the message
         if comment_info in made_comments:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, made_comments
 
         # Make comment
         comment_place = (
@@ -73,7 +73,7 @@ def create_issue(msg_info, made_comments):
         }
         # If it is, skip the message
         if comment_info in made_comments:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, made_comments
 
         # Make comment
         comment = f"\nThe error for this schema is: {error} \nThe error can be found in key: {error_absolute_schema_path}"
@@ -96,7 +96,7 @@ def create_issue(msg_info, made_comments):
         comment_error = f"\nThe error for parsing this blob is: {e}"
         comment = comment_place + comment_error
     else:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, made_comments
     return (
         title,
         comment,
@@ -161,10 +161,14 @@ def check_title(
         if comment_info not in made_comments:
             # Add comment to made comments in this session
             made_comments.append(comment_info)
+            # Replace '-' in last part of title, otherwise JIRA does not see issues
+            jql_title_list = title.split(":")
+            jql_title_list[-1] = jql_title_list[-1].replace("-", " ")
+            jql_title = ":".join(jql_title_list)
             # Get issues with title
             jql_prefix_titles = (
                 f"type = Bug AND status != Done AND status != Cancelled "
-                f'AND text ~ "{title}" '
+                f'AND text ~ "{jql_title}" '
                 "AND project = "
             )
             projects_titles = [
@@ -173,6 +177,7 @@ def check_title(
             jql_titles = " OR ".join(projects_titles)
             jql_titles = f"{jql_titles} ORDER BY priority DESC "
             issues = atlassian.list_issues(client, jql_titles)
+
             # For every issue with this title
             for issue in issues:
                 # Get comments of issues
@@ -182,14 +187,18 @@ def check_title(
                 for comment_id in issue_comment_ids:
                     # Check if the comment without where to find it does not yet exist
                     comment_body = atlassian.get_comment_body(client, issue, comment_id)
-                    if comment_error_msg_key:
-                        if (
-                            comment_error_msg_key in comment_body
-                            and comment_error in comment_body
-                            and comment_schema_key in comment_body
-                        ):
-                            comment_not_yet_exists = False
-                            break
+                    if repr(comment_body) == repr(comment):
+                        comment_not_yet_exists = False
+                        break
+                    if comment_error_msg_key and comment_error and comment_schema_key:
+                        if comment_error_msg_key:
+                            if (
+                                comment_error_msg_key in comment_body
+                                and comment_error in comment_body
+                                and comment_schema_key in comment_body
+                            ):
+                                comment_not_yet_exists = False
+                                break
                 if comment_not_yet_exists:
                     logging.info(f"Updating jira ticket: {title}")
                     # Add comment to jira ticket
@@ -218,7 +227,7 @@ def create_jira_tickets(messages_not_conform_schema, project_id, request):
 
     # Jira jql to find tickets that already exist conform these issues
     jql_prefix = (
-        "type = Bug AND status != Done AND status != Cancelled "
+        'type = Bug AND status != Done AND status != "For Review" AND status != "For Review" AND status != Cancelled '
         'AND text ~ "Message not conform schema" '
         "AND project = "
     )
