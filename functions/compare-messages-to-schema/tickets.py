@@ -158,51 +158,76 @@ def check_title(
     # If it does exist, add a comment with the message and its error
     else:
         # Check if the error message has not already been created in this session
-        if comment_info not in made_comments:
-            # Add comment to made comments in this session
-            made_comments.append(comment_info)
-            # Replace '-' in last part of title, otherwise JIRA does not see issues
-            jql_title_list = title.split(":")
-            jql_title_list[-1] = jql_title_list[-1].replace("-", " ")
-            jql_title = ":".join(jql_title_list)
-            # Get issues with title
-            jql_prefix_titles = (
-                f"type = Bug AND status != Done AND status != Cancelled "
-                f'AND text ~ "{jql_title}" '
-                "AND project = "
-            )
-            projects_titles = [
-                jql_prefix_titles + project for project in jira_projects_list
-            ]
-            jql_titles = " OR ".join(projects_titles)
-            jql_titles = f"{jql_titles} ORDER BY priority DESC "
-            issues = atlassian.list_issues(client, jql_titles)
+        made_comments = comment_exists_check(
+            comment_info,
+            made_comments,
+            title,
+            jira_projects_list,
+            client,
+            comment,
+            comment_error_msg_key,
+            comment_error,
+            comment_schema_key,
+        )
+    return made_comments
 
-            # For every issue with this title
-            for issue in issues:
-                # Get comments of issues
-                issue_id = atlassian.get_issue_id(client, issue)
-                issue_comment_ids = atlassian.list_issue_comment_ids(client, issue_id)
-                comment_not_yet_exists = True
-                for comment_id in issue_comment_ids:
-                    # Check if the comment without where to find it does not yet exist
-                    comment_body = atlassian.get_comment_body(client, issue, comment_id)
-                    if repr(comment_body) == repr(comment):
-                        comment_not_yet_exists = False
-                        break
-                    if comment_error_msg_key and comment_error and comment_schema_key:
-                        if comment_error_msg_key:
-                            if (
-                                comment_error_msg_key in comment_body
-                                and comment_error in comment_body
-                                and comment_schema_key in comment_body
-                            ):
-                                comment_not_yet_exists = False
-                                break
-                if comment_not_yet_exists:
-                    logging.info(f"Updating jira ticket: {title}")
-                    # Add comment to jira ticket
-                    atlassian.add_comment(client, issue_id, comment)
+
+def comment_exists_check(
+    comment_info,
+    made_comments,
+    title,
+    jira_projects_list,
+    client,
+    comment,
+    comment_error_msg_key,
+    comment_error,
+    comment_schema_key,
+):
+    if comment_info not in made_comments:
+        # Add comment to made comments in this session
+        made_comments.append(comment_info)
+        # Replace '-' in last part of title, otherwise JIRA does not see issues
+        jql_title_list = title.split(":")
+        jql_title_list[-1] = jql_title_list[-1].replace("-", " ")
+        jql_title = ":".join(jql_title_list)
+        # Get issues with title
+        jql_prefix_titles = (
+            f"type = Bug AND status != Done AND status != Cancelled "
+            f'AND text ~ "{jql_title}" '
+            "AND project = "
+        )
+        projects_titles = [
+            jql_prefix_titles + project for project in jira_projects_list
+        ]
+        jql_titles = " OR ".join(projects_titles)
+        jql_titles = f"{jql_titles} ORDER BY priority DESC "
+        issues = atlassian.list_issues(client, jql_titles)
+
+        # For every issue with this title
+        for issue in issues:
+            # Get comments of issues
+            issue_id = atlassian.get_issue_id(client, issue)
+            issue_comment_ids = atlassian.list_issue_comment_ids(client, issue_id)
+            comment_not_yet_exists = True
+            for comment_id in issue_comment_ids:
+                # Check if the comment without where to find it does not yet exist
+                comment_body = atlassian.get_comment_body(client, issue, comment_id)
+                if repr(comment_body) == repr(comment):
+                    comment_not_yet_exists = False
+                    break
+                if comment_error_msg_key and comment_error and comment_schema_key:
+                    if comment_error_msg_key:
+                        if (
+                            comment_error_msg_key in comment_body
+                            and comment_error in comment_body
+                            and comment_schema_key in comment_body
+                        ):
+                            comment_not_yet_exists = False
+                            break
+            if comment_not_yet_exists:
+                logging.info(f"Updating jira ticket: {title}")
+                # Add comment to jira ticket
+                atlassian.add_comment(client, issue_id, comment)
     return made_comments
 
 
