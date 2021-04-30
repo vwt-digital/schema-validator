@@ -1,6 +1,8 @@
 *config.py
 *Config.py
+config*.py
 .vscode/
+*/compare-messages-to-schema/fill_refs_schema.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
