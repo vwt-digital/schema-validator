@@ -9,13 +9,15 @@ Function that compares messages from history buckets against the schema of the t
     JIRA_SERVER = URL towards JIRA domain
     JIRA_PROJECT = JIRA project ID for to-be-created issues
     JIRA_BOARD = JIRA board ID for retrieving current sprint for to-be-created issues
-    JIRA_EPIC = Epic name for to-be-created issues
+    JIRA_EPIC = Optional, epic name for to-be-created issues
     JIRA_SECRET_ID = The ID in the secrets manager which contains the JIRA API key
     ~~~
 2. Make sure the following variables are present in the environment:
     ~~~
-    SCHEMAS_BUCKET_NAME = The bucket where the schemas can be found that are compared against messages  DATA_CATALOGS_BUCKET_NAME = The bucket where the data catalogs of projects can be found
+    SCHEMAS_BUCKET_NAME = The bucket where the schemas can be found that are compared against messages 
+    DATA_CATALOGS_BUCKET_NAME = The bucket where the data catalogs of projects can be found
     PROJECT_ID = The project ID of the project where the JIRA secret key can be found and also the project ID of the project where the delegated service account is from
+    TIMEOUT = Optional variable to set the timeout of the function, default value is 540s.
     ~~~
 3. Create a custom Google Cloud Platform role and assign this to the delegated service account (see [Permissions](#permissions));
 4. Deploy the function with help of the [cloudbuild.example.yaml](cloudbuild.example.yaml) to the Google Cloud Platform.
