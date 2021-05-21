@@ -1,15 +1,14 @@
 import json
 import logging
 
+import atlassian
 import config
+import secretmanager
 from gobits import Gobits
 from google.cloud import pubsub_v1
 
-import atlassian
-import secretmanager
 
-
-def create_issue(msg_info, made_comments):
+def get_issue_information(msg_info, made_comments):
     comment = ""
     title = ""
     comment_info = ""
@@ -107,7 +106,7 @@ def create_issue(msg_info, made_comments):
     )
 
 
-def check_title(
+def create_or_update_issue(
     titles,
     title,
     msg_info,
@@ -122,6 +121,7 @@ def check_title(
     comment_error_msg_key,
     comment_error,
     comment_schema_key,
+    jira_epic,
 ):
     if title not in titles:
         description = (
@@ -143,6 +143,9 @@ def check_title(
         atlassian.add_comment(client, issue, comment)
         # Add Jira ticket to sprint
         atlassian.add_to_sprint(client, sprint_id, issue.key)
+        # Add Jira ticket to epic if defined
+        if jira_epic:
+            atlassian.add_to_epic(client, jira_epic, issue.key)
 
         # Publish message to topic
         # Temporary until full move to formatting/interface
@@ -239,6 +242,9 @@ def create_jira_tickets(messages_not_conform_schema, project_id, request):
     jira_projects = config.JIRA_PROJECTS
     jira_board = config.JIRA_BOARD
     jira_api_key = secretmanager.get_secret(project_id, config.JIRA_SECRET_ID)
+    jira_epic = None
+    if hasattr(config, "JIRA_EPIC"):
+        jira_epic = config.JIRA_EPIC
 
     client = atlassian.jira_init(jira_user, jira_api_key, jira_server)
 
@@ -272,13 +278,13 @@ def create_jira_tickets(messages_not_conform_schema, project_id, request):
             comment_error,
             comment_schema_key,
             made_comments,
-        ) = create_issue(msg_info, made_comments)
+        ) = get_issue_information(msg_info, made_comments)
         if not title:
             continue
         # Get issues that are already conform the 'issue template'
         titles = atlassian.list_issue_titles(client, jql)
         # Check if Jira ticket already exists for this topic with this schema
-        made_comments = check_title(
+        made_comments = create_or_update_issue(
             titles,
             title,
             msg_info,
@@ -293,4 +299,5 @@ def create_jira_tickets(messages_not_conform_schema, project_id, request):
             comment_error_msg_key,
             comment_error,
             comment_schema_key,
+            jira_epic,
         )
