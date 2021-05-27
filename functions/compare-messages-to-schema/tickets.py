@@ -151,7 +151,12 @@ def create_or_update_issue(
         # Temporary until full move to formatting/interface
         metadata = Gobits.from_request(request=request).to_json()
         publisher = pubsub_v1.PublisherClient()
-        prep_message = {"gobits": [metadata], "info": description}
+        prep_message = {
+            "gobits": [metadata],
+            "topic": msg_info["topic_name"],
+            "schema": msg_info["schema_tag"],
+            "info": description,
+        }
 
         if config.TOPIC_NAME:
             future = publisher.publish(
