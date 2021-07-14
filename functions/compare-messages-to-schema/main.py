@@ -378,6 +378,9 @@ def validate_messages(request):
 
         if len(invalid_messages) > 0:
             try:
+                # TODO Remove after tickets successfully generate through jira project
+                tickets.create_jira_tickets(invalid_messages, project_id, request)
+
                 for msg_info in invalid_messages:
                     (
                         title,
@@ -399,15 +402,17 @@ def validate_messages(request):
                     publisher = pubsub_v1.PublisherClient()
                     prep_message = {
                         "gobits": [metadata],
-                        "title": title,
-                        "description": description,
-                        "comment": comment,
-                        "comment_error": comment_error,
-                        "comment_schema_key": comment_schema_key,
-                        "schema": msg_info["schema_tag"],
-                        "topic_name": msg_info["topic_name"],
-                        "bucket": msg_info["history_bucket"],
-                        "blob_name": msg_info["blob_full_name"]
+                        "issue": {
+                            "title": title,
+                            "description": description,
+                            "comment": comment,
+                            "comment_error": comment_error,
+                            "comment_schema_key": comment_schema_key,
+                            "schema": msg_info["schema_tag"],
+                            "topic_name": msg_info["topic_name"],
+                            "bucket": msg_info["history_bucket"],
+                            "blob_name": msg_info["blob_full_name"]
+                        }
                     }
                     future = publisher.publish(
                         config.TOPIC_NAME, json.dumps(prep_message).encode("utf-8")
