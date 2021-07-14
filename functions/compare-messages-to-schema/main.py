@@ -11,11 +11,13 @@ import config
 import google.auth.transport.requests as tr_requests
 import jsonschema
 from google.cloud import storage
+from google.cloud import pubsub_v1
 from google.resumable_media.requests import ChunkedDownload
 
 import auth
 import tickets
 from fill_refs_schema import fill_refs
+from gobits import Gobits
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("google.resumable_media._helpers").setLevel(level=logging.ERROR)
@@ -23,14 +25,14 @@ logging.getLogger("google.resumable_media._helpers").setLevel(level=logging.ERRO
 
 class MessageValidator(object):
     def __init__(
-        self,
-        credentials_ext,
-        topic_name,
-        messages_bucket_name,
-        schema,
-        schema_tag,
-        max_process_time,
-        process_start_time,
+            self,
+            credentials_ext,
+            topic_name,
+            messages_bucket_name,
+            schema,
+            schema_tag,
+            max_process_time,
+            process_start_time,
     ):
         """
         Initializes a class for validating messages
@@ -115,8 +117,8 @@ class MessageValidator(object):
             try:
                 jsonschema.validate(msg, self.schema)
             except (
-                jsonschema.exceptions.ValidationError,
-                jsonschema.exceptions.SchemaError,
+                    jsonschema.exceptions.ValidationError,
+                    jsonschema.exceptions.SchemaError,
             ) as e:
                 msg_info = {
                     "schema_tag": self.schema_tag,
@@ -200,13 +202,13 @@ class MessageValidator(object):
 
 class TopicProcessor(object):
     def __init__(
-        self,
-        stg_client,
-        stg_client_ext,
-        credentials_ext,
-        schemas_bucket_name,
-        max_process_time,
-        total_topics,
+            self,
+            stg_client,
+            stg_client_ext,
+            credentials_ext,
+            schemas_bucket_name,
+            max_process_time,
+            total_topics,
     ):
         """
         Initializes a class for processing topic data
@@ -303,7 +305,7 @@ class TopicProcessor(object):
 
         process_time_left = self.max_process_time - (time.time() - start_time)
         self.max_process_time = self.max_process_time + (
-            process_time_left / self.total_topics
+                process_time_left / self.total_topics
         )
 
 
@@ -376,9 +378,43 @@ def validate_messages(request):
 
         if len(invalid_messages) > 0:
             try:
-                tickets.create_jira_tickets(invalid_messages, project_id, request)
+                for msg_info in invalid_messages:
+                    (
+                        title,
+                        comment,
+                        comment_info,
+                        comment_error,
+                        comment_schema_key,
+                        made_comments,
+                    ) = tickets.get_issue_information(msg_info, [])
+
+                    description = (
+                            f"The topic `{msg_info['topic_name']}` received messages"
+                            + f" that are not conform its schema ({msg_info['schema_tag']})."
+                            + " The messages with their errors can be found in the comments of this ticket"
+                            + " Please check why the messages are not conform the schema. "
+                    )
+
+                    metadata = Gobits.from_request(request=request).to_json()
+                    publisher = pubsub_v1.PublisherClient()
+                    prep_message = {
+                        "gobits": [metadata],
+                        "title": title,
+                        "description": description,
+                        "comment": comment,
+                        "comment_error": comment_error,
+                        "comment_schema_key": comment_schema_key,
+                        "schema": msg_info["schema_tag"],
+                        "topic_name": msg_info["topic_name"],
+                        "bucket": msg_info["history_bucket"],
+                        "blob_name": msg_info["blob_full_name"]
+                    }
+                    future = publisher.publish(
+                        config.TOPIC_NAME, json.dumps(prep_message).encode("utf-8")
+                    )
+                    logging.info(f"Published message from {msg_info['topic_name']} with id {future.result()}")
             except Exception as e:
-                logging.error(f"Could not create JIRA tickets due to {e}")
+                logging.error(f"Could not publish schema error because: {e}")
                 return "Bad Request", 400
 
     return "OK", 204
